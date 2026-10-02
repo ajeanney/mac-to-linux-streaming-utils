@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Hold BetterDisplay's virtual screens on while Moonlight streams, and off otherwise.
+
+Sunshine never runs an app's `undo` command for the Desktop app, so a lease
+would leak after any disconnect. Each stream instead refreshes a lease here
+while it runs; once every lease is stale the virtual screens go back off.
+"""
+import fcntl
+import json
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+
+BETTERDISPLAY = Path('/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay')
+HIDUTIL = Path('/usr/bin/hidutil')
+CONFIG = Path.home() / '.config'
+STATE = CONFIG / 'sunshine-three-sessions.json'
+LOCK = CONFIG / 'sunshine-three-sessions.lock'
+DISPLAYS = {'left': 5, 'center': 6, 'right': 3}
+PORTS = {'left': 47989, 'center': 48189, 'right': 48389}
+# Linux refreshes every 45s, so one missed beat is not a disconnect.
+LEASE_SECONDS = 150
+# A wake request holds the screens up while Sunshine restarts around the new
+# display IDs. Linux re-sends it every second until the Mac answers.
+WAKE = 'wake'
+WAKE_SECONDS = 60
+# macOS refuses to disconnect the built-in panel of an Apple silicon Mac
+# ("set -tagID=2 -connected=off" and -disconnectAllButMain both fail here), so
+# streaming blanks it by dropping its brightness instead.
+INTERNAL = 2
+INTERNAL_BRIGHTNESS = CONFIG / 'sunshine-three-internal-brightness'
+# macOS lets us write the built-in keyboard backlight level but exposes no way
+# to read it, so the level to put back comes from this file instead of from the
+# keyboard itself. 0 is off, 1 is full.
+KEYBOARD_BACKLIGHT = CONFIG / 'sunshine-three-keyboard-backlight'
+RESTORED_KEYBOARD_BACKLIGHT = 1.0
+# Present while the Mac is already back to normal. The supervisor asks us to
+# expire every few seconds in that state, and re-applying the display and
+# keyboard values each time would fight whatever the user does by hand.
+IDLE = CONFIG / 'sunshine-three-idle'
+
+
+def command(*args, check=True):
+    result = subprocess.run([str(BETTERDISPLAY), *args], capture_output=True, text=True)
+    if check and result.returncode:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or 'BetterDisplay command failed')
+    return result
+
+
+def connected(tag, value):
+    return command('set', f'-tagID={tag}', f'-connected={value}', check=False).returncode == 0
+
+
+def is_connected(tag, expected):
+    result = command('get', f'-tagID={tag}', '-connected', check=False)
+    values = [value.strip() for value in result.stdout.strip().split(',') if value.strip()]
+    return result.returncode == 0 and bool(values) and all(value == expected for value in values)
+
+
+def display_id(tag):
+    result = command('get', f'-tagID={tag}', '-identifiers', check=False)
+    if result.returncode:
+        return None
+    try:
+        value = json.loads(result.stdout).get('displayID')
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return str(value) if str(value).isdigit() and int(value) > 0 else None
+
+
+def wait_for_display_ids(timeout=60):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ids = {side: display_id(tag) for side, tag in DISPLAYS.items()}
+        if all(ids.values()):
+            return ids
+        time.sleep(1)
+    raise RuntimeError('BetterDisplay did not connect all three virtual displays')
+
+
+def sunshine_ready(ids):
+    for side, display in ids.items():
+        config = CONFIG / f'sunshine-{side}' / 'sunshine.conf'
+        try:
+            output = next(line.split('=', 1)[1].strip() for line in config.read_text().splitlines()
+                          if line.startswith('output_name ='))
+        except (OSError, StopIteration):
+            return False
+        if output != str(display):
+            return False
+        try:
+            with socket.create_connection(('127.0.0.1', PORTS[side]), timeout=0.3):
+                pass
+        except OSError:
+            return False
+    return True
+
+
+def internal_brightness():
+    value = command('get', f'-tagID={INTERNAL}', '-brightness', check=False).stdout.strip()
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def dim_internal():
+    try:
+        saved = float(INTERNAL_BRIGHTNESS.read_text().strip())
+    except (OSError, ValueError):
+        saved = internal_brightness()
+        if saved is None or saved == 0:
+            return
+        INTERNAL_BRIGHTNESS.write_text(str(saved) + '\n')
+    command('set', f'-tagID={INTERNAL}', '-brightness=0', check=False)
+
+
+def undim_internal():
+    try:
+        saved = float(INTERNAL_BRIGHTNESS.read_text().strip())
+    except (OSError, ValueError):
+        return
+    command('set', f'-tagID={INTERNAL}', f'-brightness={saved}', check=False)
+    INTERNAL_BRIGHTNESS.unlink(missing_ok=True)
+
+
+def set_keyboard_backlight(level):
+    subprocess.run([str(HIDUTIL), 'property', '--set',
+                    '{"KeyboardBacklightBrightness":%s}' % level],
+                   capture_output=True, text=True)
+
+
+def restore_keyboard_backlight():
+    try:
+        level = float(KEYBOARD_BACKLIGHT.read_text().strip())
+    except (OSError, ValueError):
+        level = RESTORED_KEYBOARD_BACKLIGHT
+    set_keyboard_backlight(level)
+
+
+def power_on():
+    IDLE.unlink(missing_ok=True)
+    for tag in DISPLAYS.values():
+        if not connected(tag, 'on'):
+            raise RuntimeError(f'Could not connect BetterDisplay virtual screen {tag}')
+    command('set', '-tagID=6', '-main=on')
+    dim_internal()
+    set_keyboard_backlight(0)
+    return wait_for_display_ids()
+
+
+def prepare():
+    # Only the Linux wake path waits for Sunshine. Sunshine's own acquire hook
+    # runs inside the instance it is waiting for, so blocking here would time
+    # out and leave the stream with no lease.
+    power_on()
+    deadline = time.monotonic() + 150
+    next_refresh = 0
+    while time.monotonic() < deadline:
+        if any(side in read_leases() for side in DISPLAYS):
+            # Another client is already streaming; nothing left to wait for.
+            return
+        # Re-read the IDs every pass. macOS issues a new display ID when a
+        # virtual screen is reconnected and the supervisor rewrites the
+        # Sunshine configs to match a few seconds later; comparing against the
+        # IDs captured once at power-on waits forever.
+        ids = {side: display_id(tag) for side, tag in DISPLAYS.items()}
+        if all(ids.values()) and sunshine_ready(ids):
+            return
+        if time.monotonic() > next_refresh:
+            refresh_wake_lease()
+            next_refresh = time.monotonic() + 30
+        time.sleep(1)
+    raise RuntimeError('Sunshine did not finish refreshing its display capture IDs')
+
+
+def read_leases():
+    """Live leases as {side: expiry}, dropping any that ran out."""
+    now = time.time()
+    try:
+        leases = json.loads(STATE.read_text()).get('roles', {})
+        return {role: expiry for role, expiry in leases.items()
+                if role in (*DISPLAYS, WAKE) and isinstance(expiry, (int, float)) and expiry > now}
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        return {}
+
+
+def write_leases(leases):
+    temporary = STATE.with_suffix('.tmp')
+    temporary.write_text(json.dumps({'roles': leases}) + '\n')
+    temporary.replace(STATE)
+
+
+def restore():
+    if IDLE.exists():
+        return
+    write_leases({})
+    for tag in DISPLAYS.values():
+        if not connected(tag, 'off') or not is_connected(tag, 'off'):
+            print(f'Warning: could not disconnect virtual display {tag}', file=sys.stderr)
+    undim_internal()
+    restore_keyboard_backlight()
+    IDLE.touch()
+
+
+def refresh_wake_lease():
+    with LOCK.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        leases = read_leases()
+        if any(side in leases for side in DISPLAYS):
+            # A stream already owns the screens. A late wake request from a
+            # client that retried too long must not hold them up afterwards.
+            return
+        leases[WAKE] = time.time() + WAKE_SECONDS
+        write_leases(leases)
+
+
+def main(args):
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    if args == ['has-active']:
+        return int(not read_leases())
+    # Everything that talks to BetterDisplay or Sunshine runs outside the lease
+    # lock. The supervisor and Sunshine's own acquire hook both need that lock,
+    # and a 90 second prepare used to block them until the client gave up.
+    if args == ['prepare']:
+        refresh_wake_lease()
+        prepare()
+        return 0
+    if len(args) == 2 and args[0] == 'acquire' and args[1] in DISPLAYS:
+        power_on()
+    with LOCK.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        leases = read_leases()
+        if args == ['expire']:
+            # Nothing streaming: put the Mac back on its own screen.
+            if leases:
+                return 0
+        elif args == ['heartbeat']:
+            # Streams refresh their own leases. Leave the wake lease at its own
+            # expiry: extending it kept the screens up for minutes after the
+            # streams were stopped.
+            write_leases({side: leases[side] if side == WAKE else time.time() + LEASE_SECONDS
+                          for side in leases})
+            return 0
+        elif len(args) == 2 and args[0] == 'acquire' and args[1] in DISPLAYS:
+            leases[args[1]] = time.time() + LEASE_SECONDS
+            # A real stream is up now, so the start-up hold has done its job.
+            # Leaving it behind delayed the power-down after stopping.
+            leases.pop(WAKE, None)
+            write_leases(leases)
+            return 0
+        elif len(args) == 2 and args[0] == 'release' and args[1] in DISPLAYS:
+            # A stream that ended on purpose should not wait out its lease.
+            leases.pop(args[1], None)
+            if not any(side in leases for side in DISPLAYS):
+                # No stream left, and nobody asked to wake the screens in the
+                # last few seconds: drop the start-up hold too so stopping the
+                # streams powers the Mac down now instead of a minute later.
+                wake_expiry = leases.get(WAKE, 0)
+                if time.time() - (wake_expiry - WAKE_SECONDS) > 10:
+                    leases.pop(WAKE, None)
+            write_leases(leases)
+        else:
+            print('usage: mac-sunshine-session prepare|acquire ROLE|release ROLE|heartbeat|expire|has-active',
+                  file=sys.stderr)
+            return 2
+    if not leases and args[0] in ('expire', 'release'):
+        restore()
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except (OSError, RuntimeError) as error:
+        print(f'mac-sunshine-session: {error}', file=sys.stderr)
+        raise SystemExit(1)

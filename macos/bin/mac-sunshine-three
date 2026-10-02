@@ -4,19 +4,32 @@ set -u
 
 betterdisplay='/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay'
 sunshine_app='/Applications/Sunshine.app'
+session_helper="$HOME/.local/bin/mac-sunshine-session"
 config_root="$HOME/.config"
 lock_dir="$config_root/sunshine-three.lock"
+# Written by mac-sunshine-session once the Mac is back to normal. While it
+# exists, the session helper skips re-applying the display and keyboard
+# settings, so this loop cannot fight the user's own brightness keys.
+idle_marker="$config_root/sunshine-three-idle"
 
 # Keep one supervisor alive from login until logout. This lets BetterDisplay
 # be turned off during normal Mac use and brought back without manual repair.
 if ! mkdir "$lock_dir" 2>/dev/null; then
+  # Another supervisor is already running. KeepAlive will start this one
+  # again later instead of spinning.
+  sleep 15
   exit 0
 fi
 trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
 
+# Clear leases left behind by a forced logout or a Sunshine crash.
+"$session_helper" expire >/dev/null 2>&1 || true
+
 display_id_for_tag() {
-  "$betterdisplay" get -tagID="$1" -identifiers 2>/dev/null \
-    | /usr/bin/awk -F'"' '/"displayID"/ { print $4; exit }'
+  local id
+  id=$("$betterdisplay" get -tagID="$1" -identifiers 2>/dev/null \
+    | /usr/bin/awk -F'"' '/"displayID"/ { print $4; exit }')
+  [[ "$id" == <-> && "$id" != 0 ]] && print -r -- "$id"
 }
 
 sunshine_port_open() {
@@ -28,6 +41,10 @@ set_display_ids() {
   left_id=$(display_id_for_tag 5)
   center_id=$(display_id_for_tag 6)
   [[ -n "$right_id" && -n "$left_id" && -n "$center_id" ]]
+}
+
+sunshine_ports_ready() {
+  sunshine_port_open 47989 && sunshine_port_open 48189 && sunshine_port_open 48389
 }
 
 config_output_name() {
@@ -66,6 +83,13 @@ start_instance() {
 }
 
 restart_sunshine() {
+  # A vanished Sunshine instance means its lease will never be refreshed.
+  # Only start the countdown once Sunshine is really capturing. Before that,
+  # macOS is still handing out display IDs and powering down would race the
+  # client's acquire hook.
+  if ! "$session_helper" has-active && sunshine_ports_ready; then
+    "$session_helper" expire >/dev/null 2>&1 || true
+  fi
   # Turning the virtual screens off can leave macOS in a mirrored
   # arrangement. Restore the extended desktop before Sunshine probes capture.
   "$betterdisplay" set -displayID="$center_id" -mirror=off \
@@ -85,16 +109,33 @@ restart_sunshine() {
 }
 
 sleep 12
+idle_since=0
 while true; do
   # BetterDisplay keeps stable tag IDs for these virtual screens while macOS
   # may assign new capture/display IDs after a reboot or reconnect. Waiting
   # here also handles virtual screens being enabled later in the session.
   if ! set_display_ids; then
+    "$session_helper" expire >/dev/null 2>&1 || true
     if pgrep -f '/Applications/Sunshine.app/Contents/MacOS/Sunshine' >/dev/null 2>&1; then
       stop_sunshine
     fi
     sleep 2
     continue
+  fi
+  # The screens are up, so whatever the helper restored no longer applies.
+  rm -f "$idle_marker"
+
+  # The screens are up but no stream holds a lease. Give a connecting client
+  # time to run its acquire hook, then power them back down.
+  if ! "$session_helper" has-active; then
+    if (( idle_since == 0 )); then
+      idle_since=$SECONDS
+    elif (( SECONDS - idle_since > 90 )); then
+      "$session_helper" expire >/dev/null 2>&1 || true
+      idle_since=0
+    fi
+  else
+    idle_since=0
   fi
 
   needs_restart=0

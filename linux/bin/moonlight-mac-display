@@ -7,49 +7,65 @@ profile=${MAC_SCREENS_PROFILE:-stable}
 
 mac_name=${MAC_MOUSE_BRIDGE_ADDRESS:-FR-K3KFKV6TFX.local}
 mac_host=''
-resolve_candidates() {
-  if command -v avahi-resolve-host-name >/dev/null 2>&1; then
-    avahi-resolve-host-name -4 "$mac_name" 2>/dev/null | awk '{print $2}'
-  fi
-  getent ahostsv4 "$mac_name" 2>/dev/null | awk '{print $1}'
+
+port_open() {
+  timeout 1 bash -c "</dev/tcp/$1/47989" >/dev/null 2>&1
+}
+
+rtt() {
+  ping -n -c 1 -W 1 "$1" 2>/dev/null | awk -F/ '/^rtt / { print $5; exit }'
+}
+
+# mDNS answers with both the Mac's wired and wireless addresses. Rank them by
+# ping so the streams stay on the gigabit link.
+ranked_candidates() {
+  {
+    if command -v avahi-resolve-host-name >/dev/null 2>&1; then
+      avahi-resolve-host-name -4 "$mac_name" 2>/dev/null | awk '{print $2}'
+    fi
+    getent ahostsv4 "$mac_name" 2>/dev/null | awk '{print $1}'
+  } | awk 'NF && !seen[$0]++' | while read -r candidate; do
+    value=$(rtt "$candidate")
+    [ -n "$value" ] || value=9999
+    printf '%s %s\n' "$value" "$candidate"
+  done | sort -n | awk '{print $2}'
+}
+
+# Last resort when mDNS is down and the Mac moved: sweep the wired subnet.
+# Slow (neighbour table plus nmap), so it only runs when nothing answered.
+sweep_candidates() {
   wired_interface=$(ip route show default 2>/dev/null \
     | awk '$1 == "default" { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
-  if [ -n "$wired_interface" ]; then
-    ip neigh show dev "$wired_interface" 2>/dev/null \
-      | awk '$1 ~ /^[0-9]+(\.[0-9]+){3}$/ { print $1 }'
-    wired_cidr=$(ip -4 route show dev "$wired_interface" scope link 2>/dev/null \
-      | awk '$1 ~ /^[0-9]+(\.[0-9]+){3}\/[0-9]+$/ { print $1; exit }')
-    if [ -n "$wired_cidr" ] && command -v nmap >/dev/null 2>&1; then
-      nmap -n -p 47989 --open --max-retries 1 --host-timeout 1s \
-        "$wired_cidr" -oG - 2>/dev/null \
-        | awk '/Ports: 47989\/open/ { print $2 }'
-    fi
+  [ -n "$wired_interface" ] || return 0
+  ip neigh show dev "$wired_interface" 2>/dev/null \
+    | awk '$1 ~ /^[0-9]+(\.[0-9]+){3}$/ { print $1 }'
+  wired_cidr=$(ip -4 route show dev "$wired_interface" scope link 2>/dev/null \
+    | awk '$1 ~ /^[0-9]+(\.[0-9]+){3}\/[0-9]+$/ { print $1; exit }')
+  if [ -n "$wired_cidr" ] && command -v nmap >/dev/null 2>&1; then
+    nmap -n -p 47989 --open --max-retries 1 --host-timeout 1s \
+      "$wired_cidr" -oG - 2>/dev/null \
+      | awk '/Ports: 47989\/open/ { print $2 }'
   fi
 }
-for _ in $(seq 1 60); do
-  mac_host=''
-  best_rtt=''
-  for candidate in $(resolve_candidates | awk '!seen[$0]++'); do
-    if timeout 1 bash -c "</dev/tcp/$candidate/47989" >/dev/null 2>&1; then
-      candidate_rtt=$(ping -n -c 1 -W 1 "$candidate" 2>/dev/null \
-        | awk -F/ '/^rtt / { print $5; exit }')
-      if [ -z "$mac_host" ]; then
-        mac_host=$candidate
-        best_rtt=$candidate_rtt
-      elif [ -n "$candidate_rtt" ] && {
-        [ -z "$best_rtt" ] || awk -v current="$candidate_rtt" -v best="$best_rtt" \
-          'BEGIN { exit !(current < best) }'
-      }; then
-        mac_host=$candidate
-        best_rtt=$candidate_rtt
-      fi
-    fi
-  done
-  if [ -n "$mac_host" ]; then
+
+# Sunshine is stopped while the virtual screens are idle. Wake them through
+# the always-on Mac mouse bridge before looking for the Sunshine host ports.
+for candidate in $(ranked_candidates); do
+  if port_open "$candidate" || "$HOME/.local/bin/mac-screens-wake" wake "$candidate"; then
+    mac_host=$candidate
     break
   fi
-  sleep 1
 done
+
+if [ -z "$mac_host" ]; then
+  for candidate in $(sweep_candidates | awk '!seen[$0]++'); do
+    if port_open "$candidate"; then
+      mac_host=$candidate
+      break
+    fi
+  done
+fi
+
 if [ -z "$mac_host" ]; then
   mac_host=$mac_name
 fi
@@ -136,10 +152,31 @@ if [ "$side" != center ]; then
 fi
 
 child_pid=''
+heartbeat_pid=''
+released=''
+
+release_lease() {
+  if [ -n "$heartbeat_pid" ]; then
+    kill "$heartbeat_pid" 2>/dev/null || true
+    heartbeat_pid=''
+  fi
+  if [ -z "$released" ]; then
+    released=1
+    # Tell the Mac this stream is done so it can power its virtual screens
+    # down now instead of waiting out the lease.
+    "$HOME/.local/bin/mac-screens-wake" release "$mac_name" "$side" >/dev/null 2>&1 || true
+  fi
+}
+
 cleanup() {
+  release_lease
   if [ -n "$child_pid" ]; then
     kill "$child_pid" 2>/dev/null || true
+    child_pid=''
   fi
+  # Stopped on purpose: report success so systemd does not mark the unit
+  # failed (and does not restart it).
+  exit 0
 }
 trap cleanup INT TERM
 
@@ -157,6 +194,17 @@ trap cleanup INT TERM
   --no-audio-on-host \
   "$host" Desktop &
 child_pid=$!
+
+# Keep the Mac's virtual screens powered for as long as this stream runs.
+# When the stream ends this loop stops, the lease on the Mac goes stale, and
+# the Mac powers the screens back down on its own.
+(
+  while kill -0 "$child_pid" 2>/dev/null; do
+    "$HOME/.local/bin/mac-screens-wake" heartbeat "$mac_name" >/dev/null 2>&1 || true
+    sleep 45
+  done
+) &
+heartbeat_pid=$!
 
 window_id=''
 for _ in $(seq 1 100); do
@@ -205,5 +253,12 @@ done
 wait "$child_pid"
 exit_code=$?
 child_pid=''
+if [ -n "$heartbeat_pid" ]; then
+  kill "$heartbeat_pid" 2>/dev/null || true
+  wait "$heartbeat_pid" 2>/dev/null || true
+  heartbeat_pid=''
+fi
+# Moonlight exited: drop the lease too, whichever way the stream ended.
+release_lease
 trap - INT TERM
 exit "$exit_code"

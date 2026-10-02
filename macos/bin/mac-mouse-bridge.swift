@@ -4,6 +4,8 @@ import Network
 
 let port = NWEndpoint.Port(rawValue: 45991)!
 let queue = DispatchQueue(label: "com.anthony.mac-mouse-bridge")
+let sessionQueue = DispatchQueue(label: "com.anthony.mac-sunshine-session")
+var sessionBusy = false
 var lastPoint = CGEvent(source: nil)?.location ?? CGPoint(x: 0, y: 0)
 var pressedButtons = Set<Int>()
 var clickCounts = [Int: Int]()
@@ -288,10 +290,24 @@ func clearModifiers() {
     }
 }
 
-func handle(_ data: Data) {
-    guard let message = String(data: data, encoding: .utf8) else { return }
+func runSessionHelper(_ arguments: [String], failure: String) -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: NSHomeDirectory() + "/.local/bin/mac-sunshine-session")
+    process.arguments = arguments
+    do {
+        try process.run()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 ? "READY" : "ERROR"
+    } catch {
+        fputs("\(failure): \(error)\n", stderr)
+        return "ERROR"
+    }
+}
+
+func handle(_ data: Data, reply: @escaping (String?) -> Void) {
+    guard let message = String(data: data, encoding: .utf8) else { reply(nil); return }
     let fields = message.split(separator: " ")
-    guard let command = fields.first else { return }
+    guard let command = fields.first else { reply(nil); return }
 
     switch command {
     case "M" where fields.count == 3:
@@ -332,15 +348,46 @@ func handle(_ data: Data) {
         }
     case "C":
         clearModifiers()
+    case "P", "K":
+        // Bringing the virtual screens up can take a minute. Keep it off the
+        // input queue so the mouse stays responsive, and drop repeats while
+        // one is running so the client's retries cannot pile up behind the
+        // session lock.
+        let sessionArguments = command == "P" ? ["prepare"] : ["heartbeat"]
+        sessionQueue.async {
+            guard !sessionBusy else { reply(nil); return }
+            sessionBusy = true
+            let answer = runSessionHelper(sessionArguments, failure: "Could not update the Sunshine display session")
+            sessionBusy = false
+            reply(answer)
+        }
+        return
+    case "L" where fields.count == 2:
+        // The stream ended on purpose. Dropping its lease lets the Mac power
+        // the virtual screens down right away instead of waiting it out.
+        // (Not "R": that already releases the shift modifier.)
+        let side = String(fields[1])
+        sessionQueue.async {
+            guard !sessionBusy else { reply(nil); return }
+            sessionBusy = true
+            let answer = runSessionHelper(["release", side], failure: "Could not release the Sunshine display lease")
+            sessionBusy = false
+            reply(answer)
+        }
+        return
     default:
         break
     }
+    reply(nil)
 }
 
 func receive(_ connection: NWConnection) {
     connection.receiveMessage { data, _, _, error in
         if let data, error == nil {
-            handle(data)
+            handle(data) { reply in
+                guard let reply else { return }
+                connection.send(content: Data(reply.utf8), completion: .contentProcessed { _ in })
+            }
         }
         if error == nil {
             receive(connection)

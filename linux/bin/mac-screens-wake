@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Ask the Mac bridge to connect its virtual screens before Moonlight starts,
+and to keep them on while a stream runs."""
+import socket
+import subprocess
+import sys
+import time
+
+PORT = 45991
+
+
+def addresses(host):
+    found = []
+    for command in (['avahi-resolve-host-name', '-4', host], ['getent', 'ahostsv4', host]):
+        try:
+            output = subprocess.check_output(command, stderr=subprocess.DEVNULL, text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            output = ''
+        for value in output.split():
+            try:
+                ip = socket.inet_ntoa(socket.inet_aton(value))
+            except OSError:
+                continue
+            if ip not in found:
+                found.append(ip)
+    try:
+        for item in socket.getaddrinfo(host, PORT, socket.AF_INET, socket.SOCK_DGRAM):
+            if item[4][0] not in found:
+                found.append(item[4][0])
+    except OSError:
+        pass
+    return found
+
+
+def ask(host, command, timeout):
+    targets = addresses(host)
+    if not targets:
+        print(f'Could not resolve Mac host: {host}', file=sys.stderr)
+        return 1
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(1)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for ip in targets:
+                sock.sendto(command, (ip, PORT))
+            try:
+                reply, peer = sock.recvfrom(64)
+            except socket.timeout:
+                continue
+            if peer[0] in targets and reply == b'READY':
+                return 0
+            if peer[0] in targets and reply == b'ERROR':
+                print('The Mac could not prepare the virtual displays', file=sys.stderr)
+                return 1
+    print(f'Timed out waiting for the Mac to answer {command.decode()}', file=sys.stderr)
+    return 1
+
+
+if __name__ == '__main__':
+    mode = sys.argv[1] if len(sys.argv) > 1 else ''
+    host = sys.argv[2] if len(sys.argv) > 2 else ''
+    role = sys.argv[3] if len(sys.argv) > 3 else ''
+    if mode == 'wake' and host:
+        raise SystemExit(ask(host, b'P', 180))
+    if mode == 'heartbeat' and host:
+        raise SystemExit(ask(host, b'K', 10))
+    if mode == 'release' and host and role:
+        # Best effort: a reply is nice but the Mac also expires the lease.
+        raise SystemExit(ask(host, ('L ' + role).encode(), 3))
+    print('usage: mac-screens-wake wake|heartbeat HOST | release HOST ROLE', file=sys.stderr)
+    raise SystemExit(2)

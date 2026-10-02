@@ -10,6 +10,10 @@
   </array>
   <key>RunAtLoad</key>
   <true/>
+  <!-- Without this, a supervisor that dies for any reason silently stops
+       refreshing Sunshine's capture IDs and every stream fails with 503. -->
+  <key>KeepAlive</key>
+  <true/>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>StandardOutPath</key>

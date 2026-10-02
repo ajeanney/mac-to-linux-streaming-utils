@@ -32,7 +32,7 @@ tests/check.py                       Desktop-independent regression check
 .local-backups/                      Local installation/legacy backups; ignored
 ```
 
-Keep this checkout in a permanent location, such as `~/Documents/mac-three-screens`. Installed scripts and Linux units are symlinks into it. If you move the checkout, run the platform installer again to update those links.
+Keep this checkout in a permanent location, such as `~/Documents/mac-three-screens`. Linux scripts and user units are symlinks into it; the two Mac session scripts are copied into `~/.local/bin` so launchd can run them outside Documents. If you move the checkout, run the platform installer again to refresh installed files.
 
 ## Current display layout
 
@@ -75,7 +75,7 @@ The live bridge uses X11 raw input and XQueryPointer through XWayland. The launc
    /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay get -identifiers
    ```
 
-   If the tags differ, edit the three `display_id_for_tag` calls in `macos/bin/mac-sunshine-three`. Also adapt the mirror-recovery display names there if you use different virtual-display names. The current names are `Virtuel 16:9` and `Virtuel 21:9`.
+   If the tags differ, update `DISPLAYS` in `macos/bin/mac-sunshine-session` and the three `display_id_for_tag` calls in `macos/bin/mac-sunshine-three`. Also adapt the mirror-recovery display names there if you use different virtual-display names. The current names are `Virtuel 16:9` and `Virtuel 21:9`.
 3. From the checkout, install the Mac side:
 
    ```sh
@@ -97,7 +97,17 @@ The live bridge uses X11 raw input and XQueryPointer through XWayland. The launc
 6. Add the built-in **French – PC / French-PC** input source to macOS Keyboard settings for the Linux AZERTY ISO keyboard. Switch input sources manually: French-PC for Linux input, French for the Mac keyboard. There is no custom keyboard layout file or automatic layout switching. The bridge handles the Linux `< >` and `²` keys that need special forwarding.
 7. Select the Mac speakers or USB headset as the macOS audio output. All Sunshine templates have `stream_audio = false`; Moonlight audio is not part of this setup.
 
-The supervisor waits for all three virtual displays, repairs extended-display mode, refreshes capture IDs, and restarts Sunshine when an instance is missing. Turning virtual displays off and on is supported. Display geometry still needs to match the bridge's coordinate map.
+The supervisor refreshes Sunshine's capture IDs whenever the virtual screens connect. The Linux launcher wakes the Mac through the always-on mouse bridge before starting Moonlight, so all three displays can stay disconnected during normal Mac use.
+
+Each stream holds a lease on the Mac while it runs. Sunshine runs a lease's `acquire` when a client connects, and each running Moonlight stream refreshes it every 45 seconds over the mouse bridge. When a stream ends on purpose it also sends a release, so `mac-three-screens stop` powers the screens down within seconds; the first stream to connect clears the wake hold, and a late wake request from a client that retried too long is ignored once a stream owns the screens. If the Mac hears nothing at all (crash, network cut, yanked cable) the lease simply expires after 150 seconds and the supervisor powers the screens down on its own.
+
+A wake request writes a short lease of its own. That is what keeps the supervisor from powering the screens back down while Sunshine is still restarting around the new capture IDs.
+
+The `com.anthony.sunshine-three` LaunchAgent has `KeepAlive`, because a supervisor that dies silently is the difference between "works" and "every stream returns 503". If you ever see 503s, check that the agent is running first: `launchctl list | grep anthony` and `mac-sunshine-session has-active`.
+
+The built-in panel cannot be disconnected on this Mac: BetterDisplay 5.0.6 returns `Failed` for `set -tagID=2 -connected=off` and `-disconnectAllButMain` leaves it connected. Streaming instead blanks it by dropping its brightness to zero and puts the previous brightness back when the session ends. The value is saved in `~/.config/sunshine-three-internal-brightness` for the duration of the session.
+
+The built-in keyboard backlight is switched off for the same reason, with `hidutil property --set '{"KeyboardBacklightBrightness":0}'`. macOS can write that level but never reports it back, so the level to restore comes from `~/.config/sunshine-three-keyboard-backlight` (`0` is off, `1` is full; the installer writes `1.0` if the file is missing). Edit that file to match the level you normally keep.
 
 ## Linux setup and pairing
 
@@ -159,7 +169,7 @@ mac-three-screens stop
 
 The center Moonlight window owns keyboard focus. The mouse bridge sends global Mac pointer events across all three displays. Side streams are viewers: Sunshine rejects both their mouse and keyboard input. The bridge releases side-window capture after clicks and returns keyboard focus to the center.
 
-For normal Mac use, stop the streams on Linux and disable the virtual displays in BetterDisplay. Enable the virtual displays again before starting the streams.
+For normal Mac use, stop the streams on Linux. Within about two and a half minutes the leases expire and the Mac disconnects all three virtual displays. Starting `mac-three-screens` wakes them again before Moonlight connects.
 
 To disable remote mouse input entirely:
 

@@ -4,7 +4,12 @@
   },
   "apps": [
     {
-      "name": "Desktop"
+      "name": "Desktop",
+      "prep-cmd": [
+        {
+          "do": "@HOME@/.local/bin/mac-sunshine-session acquire @SIDE@"
+        }
+      ]
     }
   ]
 }
