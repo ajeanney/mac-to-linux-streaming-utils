@@ -14,7 +14,7 @@ import sys
 import time
 
 BETTERDISPLAY = Path('/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay')
-HIDUTIL = Path('/usr/bin/hidutil')
+CAFFEINATE = Path('/usr/bin/caffeinate')
 CONFIG = Path.home() / '.config'
 STATE = CONFIG / 'sunshine-three-sessions.json'
 LOCK = CONFIG / 'sunshine-three-sessions.lock'
@@ -36,6 +36,11 @@ INTERNAL_BRIGHTNESS = CONFIG / 'sunshine-three-internal-brightness'
 # keyboard itself. 0 is off, 1 is full.
 KEYBOARD_BACKLIGHT = CONFIG / 'sunshine-three-keyboard-backlight'
 RESTORED_KEYBOARD_BACKLIGHT = 1.0
+# The keyboard backlight moves in steps, and the Fn keys are the only way to
+# set it that macOS actually honours, so the two are mapped onto each other.
+KEYBOARD_STEPS = 16
+BRIDGE_PORT = 45991
+DARK_PANEL_BRIGHTNESS = 0.5
 # Present while the Mac is already back to normal. The supervisor asks us to
 # expire every few seconds in that state, and re-applying the display and
 # keyboard values each time would fight whatever the user does by hand.
@@ -111,10 +116,20 @@ def dim_internal():
         saved = float(INTERNAL_BRIGHTNESS.read_text().strip())
     except (OSError, ValueError):
         saved = internal_brightness()
-        if saved is None or saved == 0:
-            return
+        if not saved:
+            # A sleeping panel reports 0. Saving that as "nothing to restore"
+            # is what left the screen dark after a session, so wake it once and
+            # fall back to a usable level rather than staying black.
+            wake_panel()
+            saved = internal_brightness() or DARK_PANEL_BRIGHTNESS
         INTERNAL_BRIGHTNESS.write_text(str(saved) + '\n')
     command('set', f'-tagID={INTERNAL}', '-brightness=0', check=False)
+
+
+def wake_panel():
+    # Asserting user activity wakes a sleeping panel, so the brightness we put
+    # back is actually visible instead of just recorded.
+    subprocess.run([str(CAFFEINATE), '-u', '-t', '1'], capture_output=True)
 
 
 def undim_internal():
@@ -126,18 +141,36 @@ def undim_internal():
     INTERNAL_BRIGHTNESS.unlink(missing_ok=True)
 
 
-def set_keyboard_backlight(level):
-    subprocess.run([str(HIDUTIL), 'property', '--set',
-                    '{"KeyboardBacklightBrightness":%s}' % level],
-                   capture_output=True, text=True)
+def bridge(message, timeout=3):
+    """Ask the mouse bridge to do something only a trusted process can do.
+
+    hidutil property --set {"KeyboardBacklightBrightness":...} is accepted and
+    then ignored, so the keyboard backlight moves through the same media-key
+    events the Fn keys produce.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            sock.sendto(message.encode(), ('127.0.0.1', BRIDGE_PORT))
+            return sock.recv(64) == b'READY'
+    except OSError:
+        return False
 
 
-def restore_keyboard_backlight():
+def keyboard_backlight_steps():
     try:
         level = float(KEYBOARD_BACKLIGHT.read_text().strip())
     except (OSError, ValueError):
         level = RESTORED_KEYBOARD_BACKLIGHT
-    set_keyboard_backlight(level)
+    return max(0, min(KEYBOARD_STEPS, round(level * KEYBOARD_STEPS)))
+
+
+def keyboard_backlight_off():
+    bridge(f'X down {KEYBOARD_STEPS}')
+
+
+def restore_keyboard_backlight():
+    bridge(f'X up {keyboard_backlight_steps()}')
 
 
 def power_on():
@@ -147,7 +180,7 @@ def power_on():
             raise RuntimeError(f'Could not connect BetterDisplay virtual screen {tag}')
     command('set', '-tagID=6', '-main=on')
     dim_internal()
-    set_keyboard_backlight(0)
+    keyboard_backlight_off()
     return wait_for_display_ids()
 
 
@@ -197,11 +230,23 @@ def restore():
     if IDLE.exists():
         return
     write_leases({})
+    disconnected = []
     for tag in DISPLAYS.values():
-        if not connected(tag, 'off') or not is_connected(tag, 'off'):
+        # BetterDisplay occasionally refuses a disconnect while macOS is
+        # rearranging; retry once before giving up on that screen.
+        for _ in range(2):
+            if connected(tag, 'off') and is_connected(tag, 'off'):
+                disconnected.append(tag)
+                break
+        else:
             print(f'Warning: could not disconnect virtual display {tag}', file=sys.stderr)
     undim_internal()
+    wake_panel()
     restore_keyboard_backlight()
+    if len(disconnected) != len(DISPLAYS):
+        # Leave the marker off so the supervisor asks again, instead of
+        # leaving a virtual screen connected for good.
+        return
     IDLE.touch()
 
 

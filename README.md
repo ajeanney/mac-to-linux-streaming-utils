@@ -107,7 +107,7 @@ The `com.anthony.sunshine-three` LaunchAgent has `KeepAlive`, because a supervis
 
 The built-in panel cannot be disconnected on this Mac: BetterDisplay 5.0.6 returns `Failed` for `set -tagID=2 -connected=off` and `-disconnectAllButMain` leaves it connected. Streaming instead blanks it by dropping its brightness to zero and puts the previous brightness back when the session ends. The value is saved in `~/.config/sunshine-three-internal-brightness` for the duration of the session.
 
-The built-in keyboard backlight is switched off for the same reason, with `hidutil property --set '{"KeyboardBacklightBrightness":0}'`. macOS can write that level but never reports it back, so the level to restore comes from `~/.config/sunshine-three-keyboard-backlight` (`0` is off, `1` is full; the installer writes `1.0` if the file is missing). Edit that file to match the level you normally keep.
+The built-in keyboard backlight is switched off for the same reason. `hidutil property --set '{"KeyboardBacklightBrightness":...}'` is accepted by macOS and then ignored, so the bridge posts the same illumination media-key events `Fn+F5`/`Fn+F6` produce: sixteen down steps to go dark, and the level in `~/.config/sunshine-three-keyboard-backlight` mapped onto sixteen up steps to come back (`0` is off, `1` is full, and the installer writes `1.0` if the file is missing). Edit that file to match the level you normally keep. Only the mouse bridge can post those events, which is why this goes through it.
 
 ## Linux setup and pairing
 

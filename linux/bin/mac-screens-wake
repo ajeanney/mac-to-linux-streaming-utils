@@ -66,6 +66,6 @@ if __name__ == '__main__':
         raise SystemExit(ask(host, b'K', 10))
     if mode == 'release' and host and role:
         # Best effort: a reply is nice but the Mac also expires the lease.
-        raise SystemExit(ask(host, ('L ' + role).encode(), 3))
+        raise SystemExit(ask(host, ('L ' + role).encode(), 10))
     print('usage: mac-screens-wake wake|heartbeat HOST | release HOST ROLE', file=sys.stderr)
     raise SystemExit(2)

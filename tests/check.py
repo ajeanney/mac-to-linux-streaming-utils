@@ -153,30 +153,36 @@ with tempfile.TemporaryDirectory() as temp_dir:
         return SimpleNamespace(returncode=0, stdout='0.7' if '-brightness' in args else '{"displayID":"10"}')
 
     session.command = fake_command
+    session.INTERNAL_BRIGHTNESS.unlink(missing_ok=True)
     session.dim_internal()
     assert session.INTERNAL_BRIGHTNESS.read_text().strip() == '0.7'
     assert ('set', '-tagID=2', '-brightness=0') in calls
     session.undim_internal()
     assert not session.INTERNAL_BRIGHTNESS.exists()
     assert ('set', '-tagID=2', '-brightness=0.7') in calls
+    # A sleeping panel reports 0. Restoring "nothing" left the screen dark
+    # after a session, so a dark reading has to fall back to a usable level.
+    session.command = lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='0')
+    session.dim_internal()
+    assert session.INTERNAL_BRIGHTNESS.read_text().strip() == str(session.DARK_PANEL_BRIGHTNESS)
+    session.command = fake_command
+    session.INTERNAL_BRIGHTNESS.unlink(missing_ok=True)
     # Streaming turns the built-in keyboard backlight off; macOS cannot report
     # the level, so the level to put back comes from the config file.
     session.KEYBOARD_BACKLIGHT.write_text('0.5\n')
-    session.subprocess.run.reset_mock()
-    session.set_keyboard_backlight(0)
+    sent = []
+    session.bridge = lambda message, timeout=3: sent.append(message) or True
+    session.keyboard_backlight_off()
     session.restore_keyboard_backlight()
-    levels = [call.args[0][-1] for call in session.subprocess.run.call_args_list]
-    assert levels == ['{"KeyboardBacklightBrightness":0}',
-                      '{"KeyboardBacklightBrightness":0.5}'], levels
+    assert sent == ['X down 16', 'X up 8'], sent
     # The supervisor expires every few seconds while the Mac sits idle, so
     # putting everything back has to happen once and then stay put.
     session.restore = real_restore
-    session.subprocess.run.reset_mock()
+    sent.clear()
     session.restore()
-    first_pass = session.subprocess.run.call_count
-    assert session.IDLE.exists() and first_pass > 0
+    assert session.IDLE.exists() and sent == ['X up 8']
     session.restore()
-    assert session.subprocess.run.call_count == first_pass
+    assert sent == ['X up 8']
     session.power_on()
     assert not session.IDLE.exists()
 for side in ('left', 'right'):
