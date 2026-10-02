@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+
+set -u
+
+side=${1:-}
+profile=${MAC_SCREENS_PROFILE:-stable}
+
+mac_name=${MAC_MOUSE_BRIDGE_ADDRESS:-FR-K3KFKV6TFX.local}
+mac_host=''
+resolve_candidates() {
+  if command -v avahi-resolve-host-name >/dev/null 2>&1; then
+    avahi-resolve-host-name -4 "$mac_name" 2>/dev/null | awk '{print $2}'
+  fi
+  getent ahostsv4 "$mac_name" 2>/dev/null | awk '{print $1}'
+  wired_interface=$(ip route show default 2>/dev/null \
+    | awk '$1 == "default" { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+  if [ -n "$wired_interface" ]; then
+    ip neigh show dev "$wired_interface" 2>/dev/null \
+      | awk '$1 ~ /^[0-9]+(\.[0-9]+){3}$/ { print $1 }'
+    wired_cidr=$(ip -4 route show dev "$wired_interface" scope link 2>/dev/null \
+      | awk '$1 ~ /^[0-9]+(\.[0-9]+){3}\/[0-9]+$/ { print $1; exit }')
+    if [ -n "$wired_cidr" ] && command -v nmap >/dev/null 2>&1; then
+      nmap -n -p 47989 --open --max-retries 1 --host-timeout 1s \
+        "$wired_cidr" -oG - 2>/dev/null \
+        | awk '/Ports: 47989\/open/ { print $2 }'
+    fi
+  fi
+}
+for _ in $(seq 1 60); do
+  mac_host=''
+  best_rtt=''
+  for candidate in $(resolve_candidates | awk '!seen[$0]++'); do
+    if timeout 1 bash -c "</dev/tcp/$candidate/47989" >/dev/null 2>&1; then
+      candidate_rtt=$(ping -n -c 1 -W 1 "$candidate" 2>/dev/null \
+        | awk -F/ '/^rtt / { print $5; exit }')
+      if [ -z "$mac_host" ]; then
+        mac_host=$candidate
+        best_rtt=$candidate_rtt
+      elif [ -n "$candidate_rtt" ] && {
+        [ -z "$best_rtt" ] || awk -v current="$candidate_rtt" -v best="$best_rtt" \
+          'BEGIN { exit !(current < best) }'
+      }; then
+        mac_host=$candidate
+        best_rtt=$candidate_rtt
+      fi
+    fi
+  done
+  if [ -n "$mac_host" ]; then
+    break
+  fi
+  sleep 1
+done
+if [ -z "$mac_host" ]; then
+  mac_host=$mac_name
+fi
+
+case "$side:$profile" in
+  left:stable)
+    title='Mac-Left-Portrait'
+    config_home="$HOME/.config/moonlight-left"
+    host="${mac_host}:47989"
+    resolution='1200x2133'
+    fps=60
+    bitrate=60000
+    target_x=0
+    target_y=0
+    ;;
+  center:stable)
+    title='Mac-Center-Ultrawide'
+    config_home="$HOME/.config/moonlight-center"
+    host="${mac_host}:48189"
+    resolution='3440x1440'
+    fps=120
+    bitrate=60000
+    target_x=1200
+    target_y=309
+    ;;
+  right:stable)
+    title='Mac-Right-Landscape'
+    config_home="$HOME/.config/moonlight-right"
+    host="${mac_host}:48389"
+    resolution='1920x1080'
+    fps=60
+    bitrate=20000
+    target_x=4640
+    target_y=451
+    ;;
+  left:high)
+    title='Mac-Left-Portrait'
+    config_home="$HOME/.config/moonlight-left"
+    host="${mac_host}:47989"
+    resolution='1200x2133'
+    fps=60
+    bitrate=60000
+    target_x=0
+    target_y=0
+    ;;
+  center:high)
+    title='Mac-Center-Ultrawide'
+    config_home="$HOME/.config/moonlight-center"
+    host="${mac_host}:48189"
+    resolution='3440x1440'
+    fps=120
+    bitrate=60000
+    target_x=1200
+    target_y=309
+    ;;
+  right:high)
+    title='Mac-Right-Landscape'
+    config_home="$HOME/.config/moonlight-right"
+    host="${mac_host}:48389"
+    resolution='1920x1080'
+    fps=60
+    bitrate=20000
+    target_x=4640
+    target_y=451
+    ;;
+  *)
+    echo "usage: $0 left|center|right" >&2
+    exit 2
+    ;;
+esac
+
+export XDG_CONFIG_HOME="$config_home"
+export QT_QPA_PLATFORM=xcb
+export SDL_VIDEODRIVER=x11
+export DISPLAY="${DISPLAY:-:0}"
+
+if [ -z "${XAUTHORITY:-}" ]; then
+  XAUTHORITY=$(find "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" -maxdepth 1 -type f -name 'xauth_*' -print -quit 2>/dev/null)
+  export XAUTHORITY
+fi
+
+if [ "$side" != center ]; then
+  export SDL_AUDIODRIVER=dummy
+fi
+
+child_pid=''
+cleanup() {
+  if [ -n "$child_pid" ]; then
+    kill "$child_pid" 2>/dev/null || true
+  fi
+}
+trap cleanup INT TERM
+
+/usr/bin/moonlight stream \
+  --resolution "$resolution" \
+  --fps "$fps" \
+  --bitrate "$bitrate" \
+  --video-codec HEVC \
+  --video-decoder hardware \
+  --display-mode windowed \
+  --no-vsync \
+  --no-frame-pacing \
+  --capture-system-keys always \
+  --absolute-mouse \
+  --no-audio-on-host \
+  "$host" Desktop &
+child_pid=$!
+
+window_id=''
+for _ in $(seq 1 100); do
+  for candidate in $(xdotool search --class moonlight 2>/dev/null); do
+    window_name=$(xdotool getwindowname "$candidate" 2>/dev/null || true)
+    case "$window_name" in
+      "$title"*)
+        window_id=$candidate
+        break
+        ;;
+    esac
+  done
+
+  if [ -n "$window_id" ]; then
+    xdotool windowmove "$window_id" "$target_x" "$target_y" 2>/dev/null || true
+    sleep 0.2
+    xdotool windowstate --add FULLSCREEN "$window_id" 2>/dev/null || true
+    # Moonlight sees the KDE Wayland session through one XWayland display and
+    # otherwise enables its fullscreen pointer-region lock. Disable that lock
+    # so the Linux pointer can cross between the three stream windows.
+    sleep 0.2
+    xdotool windowfocus "$window_id" 2>/dev/null || true
+    sleep 0.2
+    xdotool key --window "$window_id" ctrl+alt+shift+l 2>/dev/null || true
+    # Keep the Linux cursor visible in the keyboard-focused center stream.
+    # The Moonlight client-cursor toggle can stop rendering after pointer leave/enter.
+    if [ "$side" = center ]; then
+      xdotool key --window "$window_id" ctrl+alt+shift+c 2>/dev/null || true
+    fi
+    # The side streams are viewers. Keep their keyboard/mouse capture off so
+    # they cannot overwrite the global Mac pointer controlled by the bridge.
+    if [ "$side" != center ]; then
+      xdotool key --window "$window_id" ctrl+alt+shift+z 2>/dev/null || true
+    fi
+    for candidate in $(xdotool search --class moonlight 2>/dev/null); do
+      window_name=$(xdotool getwindowname "$candidate" 2>/dev/null || true)
+      if [ "$window_name" = 'Moonlight' ]; then
+        xdotool windowminimize "$candidate" 2>/dev/null || true
+      fi
+    done
+    break
+  fi
+  sleep 0.2
+done
+
+wait "$child_pid"
+exit_code=$?
+child_pid=''
+trap - INT TERM
+exit "$exit_code"

@@ -1,0 +1,112 @@
+#!/bin/zsh
+
+set -u
+
+betterdisplay='/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay'
+sunshine_app='/Applications/Sunshine.app'
+config_root="$HOME/.config"
+lock_dir="$config_root/sunshine-three.lock"
+
+# Keep one supervisor alive from login until logout. This lets BetterDisplay
+# be turned off during normal Mac use and brought back without manual repair.
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  exit 0
+fi
+trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+
+display_id_for_tag() {
+  "$betterdisplay" get -tagID="$1" -identifiers 2>/dev/null \
+    | /usr/bin/awk -F'"' '/"displayID"/ { print $4; exit }'
+}
+
+sunshine_port_open() {
+  /usr/sbin/lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+set_display_ids() {
+  right_id=$(display_id_for_tag 3)
+  left_id=$(display_id_for_tag 5)
+  center_id=$(display_id_for_tag 6)
+  [[ -n "$right_id" && -n "$left_id" && -n "$center_id" ]]
+}
+
+config_output_name() {
+  /usr/bin/awk -F'= ' '/^output_name = / { print $2; exit }' "$1"
+}
+
+stop_sunshine() {
+  pkill -f '/Applications/Sunshine.app/Contents/MacOS/Sunshine' >/dev/null 2>&1 || true
+  sleep 1
+}
+
+start_instance() {
+  local side="$1"
+  local port="$2"
+  local config="$config_root/sunshine-$side/sunshine.conf"
+
+  /usr/bin/open -n -a "$sunshine_app" --args "$config" >/dev/null 2>&1 &
+  for _ in {1..20}; do
+    if sunshine_port_open "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  # macOS can occasionally drop an open request while starting several
+  # instances at once. Retry once, but only if the expected port is absent.
+  /usr/bin/open -n -a "$sunshine_app" --args "$config" >/dev/null 2>&1 &
+  for _ in {1..20}; do
+    if sunshine_port_open "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+  print -u2 "Sunshine $side instance did not open port $port"
+  return 1
+}
+
+restart_sunshine() {
+  # Turning the virtual screens off can leave macOS in a mirrored
+  # arrangement. Restore the extended desktop before Sunshine probes capture.
+  "$betterdisplay" set -displayID="$center_id" -mirror=off \
+    -targetnamelike='Color LCD,Virtuel 16:9' >/dev/null 2>&1 || true
+
+  sed -i '' "s/^output_name = .*/output_name = $left_id/" \
+    "$config_root/sunshine-left/sunshine.conf"
+  sed -i '' "s/^output_name = .*/output_name = $center_id/" \
+    "$config_root/sunshine-center/sunshine.conf"
+  sed -i '' "s/^output_name = .*/output_name = $right_id/" \
+    "$config_root/sunshine-right/sunshine.conf"
+
+  stop_sunshine
+  start_instance left 47989 || true
+  start_instance center 48189 || true
+  start_instance right 48389 || true
+}
+
+sleep 12
+while true; do
+  # BetterDisplay keeps stable tag IDs for these virtual screens while macOS
+  # may assign new capture/display IDs after a reboot or reconnect. Waiting
+  # here also handles virtual screens being enabled later in the session.
+  if ! set_display_ids; then
+    if pgrep -f '/Applications/Sunshine.app/Contents/MacOS/Sunshine' >/dev/null 2>&1; then
+      stop_sunshine
+    fi
+    sleep 2
+    continue
+  fi
+
+  needs_restart=0
+  [[ "$(config_output_name "$config_root/sunshine-left/sunshine.conf")" == "$left_id" ]] || needs_restart=1
+  [[ "$(config_output_name "$config_root/sunshine-center/sunshine.conf")" == "$center_id" ]] || needs_restart=1
+  [[ "$(config_output_name "$config_root/sunshine-right/sunshine.conf")" == "$right_id" ]] || needs_restart=1
+  sunshine_port_open 47989 || needs_restart=1
+  sunshine_port_open 48189 || needs_restart=1
+  sunshine_port_open 48389 || needs_restart=1
+
+  if (( needs_restart )); then
+    restart_sunshine
+  fi
+  sleep 5
+done

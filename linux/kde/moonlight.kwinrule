@@ -1,0 +1,16 @@
+[$Version]
+update_info=kwinrules.upd:replace-placement-string-to-enum,kwinrules.upd:use-virtual-desktop-ids
+
+[1]
+description=Moonlight: deliver Mac shortcuts to stream
+disableglobalshortcuts=true
+disableglobalshortcutsrule=2
+enabled=true
+types=1
+wmclass=com.moonlight_stream.Moonlight
+wmclasscomplete=false
+wmclassmatch=1
+
+[General]
+count=1
+rules=1

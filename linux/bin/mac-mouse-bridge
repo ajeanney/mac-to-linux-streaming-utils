@@ -1,0 +1,490 @@
+#!/usr/bin/env python3
+import ctypes
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import threading
+import time
+
+MAC_ADDRESS = os.environ.get("MAC_MOUSE_BRIDGE_ADDRESS", "FR-K3KFKV6TFX.local")
+MAC_PORT = 45991
+DISPLAY = os.environ.get("DISPLAY", ":0")
+
+
+def resolve_mac_address(host):
+    candidates = []
+    if host.endswith(".local"):
+        commands = [
+            ["avahi-resolve-host-name", "-4", host],
+            ["getent", "ahostsv4", host],
+        ]
+        for command in commands:
+            try:
+                output = subprocess.check_output(
+                    command, stderr=subprocess.DEVNULL, text=True, timeout=2,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            for token in output.split():
+                try:
+                    socket.inet_aton(token)
+                except OSError:
+                    continue
+                if token not in candidates:
+                    candidates.append(token)
+    try:
+        route_output = subprocess.check_output(
+            ["ip", "route", "show", "default"],
+            stderr=subprocess.DEVNULL, text=True, timeout=2,
+        )
+        interface = next(
+            (parts[index + 1] for parts in (line.split() for line in route_output.splitlines())
+             for index, value in enumerate(parts[:-1]) if value == "dev"),
+            None,
+        )
+    except (OSError, subprocess.SubprocessError):
+        interface = None
+    if interface:
+        try:
+            neighbors = subprocess.check_output(
+                ["ip", "neigh", "show", "dev", interface],
+                stderr=subprocess.DEVNULL, text=True, timeout=2,
+            )
+            for token in neighbors.split():
+                try:
+                    socket.inet_aton(token)
+                except OSError:
+                    continue
+                if token not in candidates:
+                    candidates.append(token)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            wired_cidr = subprocess.check_output(
+                ["ip", "-4", "route", "show", "dev", interface, "scope", "link"],
+                stderr=subprocess.DEVNULL, text=True, timeout=2,
+            ).split()[0]
+        except (IndexError, OSError, subprocess.SubprocessError):
+            wired_cidr = None
+        if wired_cidr:
+            try:
+                scan = subprocess.check_output(
+                    [
+                        "nmap", "-n", "-p", "47989", "--open",
+                        "--max-retries", "1", "--host-timeout", "1s",
+                        wired_cidr, "-oG", "-",
+                    ],
+                    stderr=subprocess.DEVNULL, text=True, timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                scan = ""
+            for token in scan.split():
+                try:
+                    socket.inet_aton(token)
+                except OSError:
+                    continue
+                if token not in candidates:
+                    candidates.append(token)
+    if not candidates:
+        try:
+            candidates.append(socket.gethostbyname(host))
+        except OSError:
+            return host
+
+    # The Mac can advertise the same Bonjour name on Wi-Fi and Ethernet.
+    # Pick the address with the fastest reachable Sunshine control port so
+    # mouse UDP follows the same wired path as the video streams.
+    best_address = None
+    best_elapsed = None
+    for address in candidates:
+        started = time.monotonic()
+        try:
+            with socket.create_connection((address, 47989), timeout=1):
+                elapsed = time.monotonic() - started
+        except OSError:
+            continue
+        if best_elapsed is None or elapsed < best_elapsed:
+            best_address = address
+            best_elapsed = elapsed
+    return best_address or candidates[0]
+
+# These are the current BetterDisplay coordinates after arranging the Mac
+# desktop as portrait -> ultrawide -> landscape. They are global macOS
+# desktop coordinates, so the portrait display intentionally starts at x=-1080.
+MAC_DISPLAYS = {
+    "Mac-Left-Portrait": (-1080, -184, 1080, 1920),
+    "Mac-Center-Ultrawide": (0, 0, 3440, 1440),
+    "Mac-Right-Landscape": (3440, 153, 1920, 1080),
+}
+
+WINDOWS = {}
+WINDOWS_LOCK = threading.Lock()
+OUT = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+DESTINATION = None
+MODIFIER_KEYS = {37, 50, 62, 64, 105, 108, 133, 134}
+COMMAND_MASK = 1 << 6  # X11 Mod4, used by Linux Super/Meta
+CONTROL_MASK = 1 << 2
+last_sent_shift = None
+last_sent_command = None
+last_sent_control = None
+
+
+def send(message):
+    try:
+        OUT.sendto(message.encode("ascii"), DESTINATION)
+    except OSError:
+        pass
+
+
+def set_shift_state(down):
+    global last_sent_shift
+    if last_sent_shift == down:
+        return
+    send(f"S {1 if down else 0}")
+    last_sent_shift = down
+
+
+def force_shift_release():
+    global last_sent_shift
+    send("R")
+    last_sent_shift = False
+
+
+def set_command_state(down):
+    global last_sent_command
+    if last_sent_command == down:
+        return
+    send(f"D {1 if down else 0}")
+    last_sent_command = down
+
+
+def force_command_release():
+    global last_sent_command
+    send("Q")
+    last_sent_command = False
+
+
+def set_control_state(down):
+    global last_sent_control
+    if last_sent_control == down:
+        return
+    send(f"V {1 if down else 0}")
+    last_sent_control = down
+
+
+class X11Pointer:
+    class Display(ctypes.Structure):
+        pass
+
+    def __init__(self):
+        self.x11 = ctypes.CDLL("libX11.so.6")
+        self.x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        self.x11.XOpenDisplay.restype = ctypes.POINTER(self.Display)
+        self.x11.XDefaultRootWindow.argtypes = [ctypes.POINTER(self.Display)]
+        self.x11.XDefaultRootWindow.restype = ctypes.c_ulong
+        self.x11.XQueryPointer.argtypes = [
+            ctypes.POINTER(self.Display), ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_uint),
+        ]
+        self.x11.XQueryPointer.restype = ctypes.c_int
+        self.display = self.x11.XOpenDisplay(DISPLAY.encode())
+        if not self.display:
+            raise RuntimeError("cannot open XWayland display")
+        self.root = self.x11.XDefaultRootWindow(self.display)
+        self.last_mask = 0
+
+    def get(self):
+        root = ctypes.c_ulong()
+        child = ctypes.c_ulong()
+        root_x = ctypes.c_int()
+        root_y = ctypes.c_int()
+        win_x = ctypes.c_int()
+        win_y = ctypes.c_int()
+        mask = ctypes.c_uint()
+        ok = self.x11.XQueryPointer(
+            self.display, self.root,
+            ctypes.byref(root), ctypes.byref(child),
+            ctypes.byref(root_x), ctypes.byref(root_y),
+            ctypes.byref(win_x), ctypes.byref(win_y), ctypes.byref(mask),
+        )
+        self.last_mask = mask.value if ok else 0
+        return (root_x.value, root_y.value) if ok else None
+
+
+POINTER = None
+
+
+def refresh_windows():
+    found = {}
+    env = os.environ.copy()
+    env["DISPLAY"] = DISPLAY
+    try:
+        result = subprocess.run(
+            ["xdotool", "search", "--class", "moonlight"],
+            env=env, capture_output=True, text=True, timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+
+    for raw_id in result.stdout.splitlines():
+        try:
+            window_id = int(raw_id.strip())
+        except ValueError:
+            continue
+        try:
+            title = subprocess.run(
+                ["xdotool", "getwindowname", str(window_id)],
+                env=env, capture_output=True, text=True, timeout=1,
+            ).stdout.strip()
+            geometry = subprocess.run(
+                ["xdotool", "getwindowgeometry", "--shell", str(window_id)],
+                env=env, capture_output=True, text=True, timeout=1,
+            ).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+
+        target = next((name for name in MAC_DISPLAYS if title.startswith(name)), None)
+        if not target:
+            continue
+        values = dict(re.findall(r"^(X|Y|WIDTH|HEIGHT)=(\d+)$", geometry, re.MULTILINE))
+        if not all(key in values for key in ("X", "Y", "WIDTH", "HEIGHT")):
+            continue
+        found[target] = (
+            int(values["X"]), int(values["Y"]),
+            int(values["WIDTH"]), int(values["HEIGHT"]),
+            window_id,
+        )
+
+    with WINDOWS_LOCK:
+        WINDOWS.clear()
+        WINDOWS.update(found)
+
+
+def map_pointer(position):
+    if position is None:
+        return None
+    px, py = position
+    with WINDOWS_LOCK:
+        current = list(WINDOWS.items())
+    for name, (window_x, window_y, window_w, window_h, _) in current:
+        if not (window_x <= px < window_x + window_w and window_y <= py < window_y + window_h):
+            continue
+        mac_x, mac_y, mac_w, mac_h = MAC_DISPLAYS[name]
+        x = mac_x + ((px - window_x) * mac_w / window_w)
+        y = mac_y + ((py - window_y) * mac_h / window_h)
+        return round(x), round(y)
+    return None
+
+
+def screen_at(position):
+    if position is None:
+        return None
+    px, py = position
+    with WINDOWS_LOCK:
+        current = list(WINDOWS.items())
+    for name, (window_x, window_y, window_w, window_h, _) in current:
+        if window_x <= px < window_x + window_w and window_y <= py < window_y + window_h:
+            return name
+    return None
+
+
+def window_id_for(name):
+    with WINDOWS_LOCK:
+        window = WINDOWS.get(name)
+    return window[4] if window else None
+
+
+def reset_side_input(name):
+    if name not in ("Mac-Left-Portrait", "Mac-Right-Landscape"):
+        return
+    window_id = window_id_for(name)
+    if not window_id:
+        return
+    env = os.environ.copy()
+    env["DISPLAY"] = DISPLAY
+    # The side Sunshine hosts reject keyboard input, including this chord.
+    try:
+        subprocess.run(
+            ["xdotool", "key", "--window", str(window_id), "ctrl+alt+shift+z"],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    center_id = window_id_for("Mac-Center-Ultrawide")
+    if center_id:
+        try:
+            subprocess.run(
+                ["xdotool", "windowactivate", str(center_id)],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def clear_stuck_modifiers():
+    send("C")
+
+
+def send_current():
+    position = POINTER.get()
+    mapped = map_pointer(position)
+    if mapped is not None:
+        send(f"M {mapped[0]} {mapped[1]}")
+
+
+def input_reader():
+    env = os.environ.copy()
+    env["DISPLAY"] = DISPLAY
+    while True:
+        try:
+            process = subprocess.Popen(
+                ["xinput", "test-xi2", "--root"],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, bufsize=1,
+            )
+            event = None
+            shift_down = False
+            modifiers_down = set()
+            last_left_press = 0.0
+            left_press_target = None
+            for raw_line in process.stdout:
+                line = raw_line.strip()
+                if line.startswith("EVENT type "):
+                    if "(RawMotion)" in line:
+                        event = "motion"
+                    elif "(RawButtonPress)" in line:
+                        event = "press"
+                    elif "(RawButtonRelease)" in line:
+                        event = "release"
+                    elif "(RawKeyPress)" in line:
+                        event = "key_press"
+                    elif "(RawKeyRelease)" in line:
+                        event = "key_release"
+                    else:
+                        event = None
+                elif event in ("press", "release") and line.startswith("detail:"):
+                    try:
+                        button = int(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        continue
+                    if 1 <= button <= 3:
+                        target = screen_at(POINTER.get())
+                        if button == 1 and event == "press":
+                            left_press_target = target
+                        shift_is_down = bool(POINTER.last_mask & 1)
+                        command_is_down = bool(POINTER.last_mask & COMMAND_MASK)
+                        control_is_down = bool(POINTER.last_mask & CONTROL_MASK)
+                        if button == 1 and event == "press" and last_sent_control != control_is_down:
+                            set_control_state(control_is_down)
+                        if (button == 1 and event == "press" and
+                                not shift_is_down and last_sent_shift is True):
+                            # Release only Shift before a normal click. This
+                            # repairs a macOS Shift key-up lost by Sunshine
+                            # without disturbing Command or Control.
+                            force_shift_release()
+                        if (button == 1 and event == "press" and
+                                not command_is_down and last_sent_command is True):
+                            # Repair a Linux Super/Meta release lost while
+                            # Moonlight or KDE changed focus.
+                            force_command_release()
+                        if button == 1 and event == "press" and not modifiers_down:
+                            now = time.monotonic()
+                            if now - last_left_press <= 0.5:
+                                clear_stuck_modifiers()
+                            last_left_press = now
+                        # RawMotion already carries real drags. Resampling on
+                        # release can turn Moonlight's pointer warp into a
+                        # downward drag, which opens Chromium's reload menu.
+                        if event == "press":
+                            send_current()
+                        send(f"B {button} {1 if event == 'press' else 0}")
+                        if button == 1 and event == "release":
+                            if left_press_target in (
+                                    "Mac-Left-Portrait", "Mac-Right-Landscape"):
+                                reset_side_input(left_press_target)
+                            left_press_target = None
+                    elif event == "press" and button in (4, 5, 6, 7):
+                        vertical = 1 if button == 4 else -1 if button == 5 else 0
+                        horizontal = 1 if button == 6 else -1 if button == 7 else 0
+                        send(f"W {vertical * 80} {horizontal * 80}")
+                    elif button in (8, 9):
+                        send(f"B {button} {1 if event == 'press' else 0}")
+                elif event in ("key_press", "key_release") and line.startswith("detail:"):
+                    try:
+                        key = int(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        continue
+                    down = event == "key_press"
+                    if key in MODIFIER_KEYS:
+                        if down:
+                            modifiers_down.add(key)
+                        else:
+                            modifiers_down.discard(key)
+                    if key in (37, 105):
+                        control_is_down = any(k in modifiers_down for k in (37, 105))
+                        set_control_state(control_is_down)
+                    if key in (133, 134):
+                        command_is_down = any(k in modifiers_down for k in (133, 134))
+                        set_command_state(command_is_down)
+                        if not command_is_down:
+                            force_command_release()
+                    if key in (50, 62):
+                        shift_down = down
+                        set_shift_state(down)
+                        if not down:
+                            send("R")
+                    elif key == 94:
+                        # X11 keycode 94 is the ISO key beside Left Shift.
+                        # Sunshine sends it as OEM_102 (0xE2), which its
+                        # macOS backend currently ignores.
+                        send(f"I {1 if down else 0} {1 if shift_down else 0}")
+                    elif key == 49:
+                        # X11 keycode 49 is the top-left ² key. Sunshine's
+                        # normal mapping collides with our < key workaround.
+                        send(f"T {1 if down else 0} {1 if shift_down else 0}")
+                    event = None
+                elif not line and event == "motion":
+                    send_current()
+                    event = None
+                elif not line:
+                    event = None
+        except (OSError, BrokenPipeError):
+            pass
+        time.sleep(1)
+
+
+def window_refresher():
+    while True:
+        refresh_windows()
+        time.sleep(2)
+
+
+def main():
+    global DESTINATION, POINTER
+    # KDE creates a new XWayland authorization file each login.
+    os.environ.setdefault("DISPLAY", DISPLAY)
+    if not os.environ.get("XAUTHORITY"):
+        runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+        authority = next(runtime.glob("xauth_*"), None)
+        if authority is not None:
+            os.environ["XAUTHORITY"] = str(authority)
+    DESTINATION = (resolve_mac_address(MAC_ADDRESS), MAC_PORT)
+    POINTER = X11Pointer()
+    refresh_windows()
+    set_control_state(False)
+    threading.Thread(target=window_refresher, daemon=True).start()
+    threading.Thread(target=input_reader, daemon=True).start()
+    send_current()
+    while True:
+        time.sleep(3600)
+
+
+if __name__ == "__main__":
+    main()

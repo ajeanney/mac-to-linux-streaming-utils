@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+set -u
+
+units=(mac-three-screens-left.service mac-three-screens-center.service mac-three-screens-right.service)
+command=${1:-status}
+
+case "$command" in
+  start|restart)
+    profile=${2:-stable}
+    case "$profile" in
+      stable|high) ;;
+      *) echo "profile must be stable or high" >&2; exit 2 ;;
+    esac
+    systemctl --user stop "${units[@]}" >/dev/null 2>&1 || true
+    systemctl --user set-environment "MAC_SCREENS_PROFILE=$profile"
+    systemctl --user start "${units[@]}"
+    export DISPLAY="${DISPLAY:-:0}"
+    if [ -z "${XAUTHORITY:-}" ]; then
+      XAUTHORITY=$(find "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" -maxdepth 1 -type f -name 'xauth_*' -print -quit 2>/dev/null)
+      export XAUTHORITY
+    fi
+    # Keep the center stream as the keyboard focus after all three windows
+    # have been created. Pointer movement remains free to cross all windows.
+    for _ in $(seq 1 60); do
+      center_window=''
+      for candidate in $(/usr/bin/xdotool search --class moonlight 2>/dev/null); do
+        window_name=$(/usr/bin/xdotool getwindowname "$candidate" 2>/dev/null || true)
+        case "$window_name" in
+          Mac-Center-Ultrawide*) center_window=$candidate; break ;;
+        esac
+      done
+      if [ -n "$center_window" ]; then
+        /usr/bin/xdotool windowactivate --sync "$center_window" 2>/dev/null || true
+        break
+      fi
+      sleep 0.25
+    done
+    ;;
+  stop)
+    systemctl --user stop "${units[@]}"
+    systemctl --user unset-environment MAC_SCREENS_PROFILE >/dev/null 2>&1 || true
+    ;;
+  status)
+    systemctl --user --no-pager --full status "${units[@]}"
+    ;;
+  *)
+    echo "usage: $0 start [stable|high] | restart [stable|high] | stop | status" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,11 @@
+[Unit]
+Description=Moonlight Mac right landscape display
+After=graphical-session.target
+
+[Service]
+EnvironmentFile=-%h/.config/mac-three-screens/environment
+ExecStart=%h/.local/bin/moonlight-mac-display right
+Restart=on-failure
+RestartSec=2
+StandardOutput=append:%h/.local/state/mac-three-screens/right.log
+StandardError=append:%h/.local/state/mac-three-screens/right.log
