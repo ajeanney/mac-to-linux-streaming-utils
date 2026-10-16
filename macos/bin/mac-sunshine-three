@@ -6,7 +6,7 @@ betterdisplay='/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay'
 sunshine_app='/Applications/Sunshine.app'
 session_helper="$HOME/.local/bin/mac-sunshine-session"
 config_root="$HOME/.config"
-lock_dir="$config_root/sunshine-three.lock"
+lock_file="$config_root/sunshine-three-supervisor.lock"
 # Written by mac-sunshine-session once the Mac is back to normal. While it
 # exists, the session helper skips re-applying the display and keyboard
 # settings, so this loop cannot fight the user's own brightness keys.
@@ -14,13 +14,10 @@ idle_marker="$config_root/sunshine-three-idle"
 
 # Keep one supervisor alive from login until logout. This lets BetterDisplay
 # be turned off during normal Mac use and brought back without manual repair.
-if ! mkdir "$lock_dir" 2>/dev/null; then
-  # Another supervisor is already running. KeepAlive will start this one
-  # again later instead of spinning.
-  sleep 15
-  exit 0
+if [[ "${1:-}" != --locked ]]; then
+  exec /usr/bin/lockf -k -t 0 "$lock_file" /bin/zsh "$0" --locked
 fi
-trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+trap 'exit 0' INT TERM
 
 # Clear leases left behind by a forced logout or a Sunshine crash.
 "$session_helper" expire >/dev/null 2>&1 || true

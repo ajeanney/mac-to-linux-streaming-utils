@@ -91,7 +91,6 @@ if [[ "$mode" != --no-start ]]; then
   done
   pkill -x mac-mouse-bridge 2>/dev/null || true
   pkill -f "^/Applications/Sunshine.app/Contents/MacOS/Sunshine $HOME/.config/sunshine-(left|center|right)/sunshine.conf$" 2>/dev/null || true
-  rmdir "$HOME/.config/sunshine-three.lock" 2>/dev/null || true
   for label in com.anthony.mac-mouse-bridge com.anthony.sunshine-three; do
     # bootout returns before the label is gone, so checking too early used to
     # pick kickstart on a job that was still being removed and leave nothing
