@@ -1,6 +1,6 @@
 # Mac to Linux screen streaming
 
-Stream one or more BetterDisplay virtual Mac displays to monitors attached to a Linux PC, with the Linux mouse and keyboard controlling the Mac. The default is a single display; a multi-monitor desk (for example portrait + ultrawide + landscape) is a matter of configuration. The repository contains both platforms' source files, service definitions and non-secret configuration templates.
+Use the monitors of a Linux PC as screens for a Mac: each BetterDisplay virtual display is streamed over Sunshine/Moonlight, and the Linux mouse and keyboard drive the Mac. One screen by default, a whole multi-monitor desk with a bit of configuration. The repository contains both platforms' source files, service definitions and non-secret configuration templates.
 
 Video uses one Sunshine instance per screen on the Mac and one Moonlight window per screen on Linux. Keyboard input goes through the primary screen's stream. A Python bridge on Linux maps the desktop pointer to macOS coordinates and sends mouse events over UDP to a Swift bridge on the Mac. Audio stays on the Mac.
 
@@ -93,7 +93,7 @@ The live bridge uses X11 raw input and XQueryPointer through XWayland. The launc
 
 ## Mac setup
 
-1. Open BetterDisplay and create/enable one virtual display per screen with the sizes, HiDPI backing resolutions and refresh rates you want. Arrange them in macOS Displays to match the `MAC_X`/`MAC_Y` values you will configure, and make the primary screen's virtual display the main display. BetterDisplay must be running at login.
+1. Open BetterDisplay and create/enable one virtual display per screen with the sizes and refresh rates you want. Use the non-HiDPI mode at the stream size (`BetterDisplay set -tagID=N -resolution=WxH -hiDPI=off`): the stream is 1× anyway, and HiDPI makes the Mac render and capture four times the pixels, which costs GPU time and latency. Arrange them in macOS Displays to match the `MAC_X`/`MAC_Y` values you will configure, and make the primary screen's virtual display the main display. BetterDisplay must be running at login.
 2. Create the config (see [Configuration](#configuration)) with your tags, either by copying `config.example` to `~/.config/mac-three-screens/config` or by running the installer once, which creates it and stops so you can fill it in.
 3. From the checkout, install the Mac side:
 
