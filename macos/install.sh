@@ -41,8 +41,6 @@ if [[ "$mode" != --no-start || ! -x "$HOME/.local/bin/mac-mouse-bridge" ]]; then
   swiftc "$root/macos/bin/mac-mouse-bridge.swift" -o "$HOME/.local/bin/mac-mouse-bridge.new"
   mv "$HOME/.local/bin/mac-mouse-bridge.new" "$HOME/.local/bin/mac-mouse-bridge"
 fi
-osacompile -o "$HOME/.local/bin/mac-mouse-bridge-launch.scpt" \
-  "$root/macos/bin/mac-mouse-bridge-launch.applescript" >/dev/null
 
 python3 - "$root" "$backup" <<'PY'
 from pathlib import Path

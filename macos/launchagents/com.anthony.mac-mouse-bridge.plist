@@ -6,10 +6,11 @@
   <string>com.anthony.mac-mouse-bridge</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/osascript</string>
-    <string>@HOME@/.local/bin/mac-mouse-bridge-launch.scpt</string>
+    <string>@HOME@/.local/bin/mac-mouse-bridge</string>
   </array>
   <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
   <true/>
   <key>ProcessType</key>
   <string>Interactive</string>

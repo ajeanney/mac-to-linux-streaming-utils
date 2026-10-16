@@ -2,6 +2,11 @@ import CoreGraphics
 import Foundation
 import Network
 
+if !CGPreflightPostEventAccess() {
+    _ = CGRequestPostEventAccess()
+    fputs("mac-mouse-bridge needs Accessibility permission in System Settings to post clicks and keys.\n", stderr)
+}
+
 let port = NWEndpoint.Port(rawValue: 45991)!
 let queue = DispatchQueue(label: "com.anthony.mac-mouse-bridge")
 let sessionQueue = DispatchQueue(label: "com.anthony.mac-sunshine-session")
