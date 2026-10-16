@@ -2,7 +2,10 @@
 
 set -u
 
-units=(mac-three-screens-left.service mac-three-screens-center.service mac-three-screens-right.service)
+cfg="$HOME/.local/bin/mac-three-screens-config"
+units=()
+while read -r name; do units+=("mac-three-screens@$name.service"); done < <("$cfg" names)
+[ "${#units[@]}" -gt 0 ] || { echo "No screens configured; check ~/.config/mac-three-screens/config" >&2; exit 2; }
 command=${1:-status}
 
 stop_streams() {
@@ -17,27 +20,23 @@ stop_streams() {
 
 case "$command" in
   start|restart)
-    profile=${2:-stable}
-    case "$profile" in
-      stable|high) ;;
-      *) echo "profile must be stable or high" >&2; exit 2 ;;
-    esac
+    "$cfg" check linux || exit 2
     stop_streams || echo "Could not confirm previous session cleanup; trying a new session." >&2
-    systemctl --user set-environment "MAC_SCREENS_PROFILE=$profile"
     systemctl --user start "${units[@]}"
     export DISPLAY="${DISPLAY:-:0}"
     if [ -z "${XAUTHORITY:-}" ]; then
       XAUTHORITY=$(find "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" -maxdepth 1 -type f -name 'xauth_*' -print -quit 2>/dev/null)
       export XAUTHORITY
     fi
-    # Keep the center stream as the keyboard focus after all three windows
-    # have been created. Pointer movement remains free to cross all windows.
+    # Keep the primary stream as the keyboard focus after all windows have
+    # been created. Pointer movement remains free to cross all windows.
+    primary_title="Mac-$("$cfg" primary)"
     for _ in $(seq 1 60); do
       center_window=''
       for candidate in $(/usr/bin/xdotool search --class moonlight 2>/dev/null); do
         window_name=$(/usr/bin/xdotool getwindowname "$candidate" 2>/dev/null || true)
         case "$window_name" in
-          Mac-Center-Ultrawide*) center_window=$candidate; break ;;
+          "$primary_title"*) center_window=$candidate; break ;;
         esac
       done
       if [ -n "$center_window" ]; then
@@ -49,13 +48,12 @@ case "$command" in
     ;;
   stop)
     stop_streams || exit 1
-    systemctl --user unset-environment MAC_SCREENS_PROFILE >/dev/null 2>&1 || true
     ;;
   status)
     systemctl --user --no-pager --full status "${units[@]}"
     ;;
   *)
-    echo "usage: $0 start [stable|high] | restart [stable|high] | stop | status" >&2
+    echo "usage: $0 start | restart | stop | status" >&2
     exit 2
     ;;
 esac

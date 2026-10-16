@@ -3,9 +3,10 @@
 set -u
 
 side=${1:-}
-profile=${MAC_SCREENS_PROFILE:-stable}
+cfg="$HOME/.local/bin/mac-three-screens-config"
 
-mac_name=${MAC_MOUSE_BRIDGE_ADDRESS:-FR-K3KFKV6TFX.local}
+"$cfg" check linux || exit 2
+mac_name=$("$cfg" get MAC_HOST)
 mac_host=''
 
 port_open() {
@@ -85,72 +86,17 @@ mkdir -p "$state_dir"
 printf '%s\n' "$mac_host" > "$state_dir/host.$$"
 mv "$state_dir/host.$$" "$state_dir/host"
 
-case "$side:$profile" in
-  left:stable)
-    title='Mac-Left-Portrait'
-    config_home="$HOME/.config/moonlight-left"
-    host="${mac_host}:47989"
-    resolution='1200x2133'
-    fps=60
-    bitrate=60000
-    target_x=0
-    target_y=0
-    ;;
-  center:stable)
-    title='Mac-Center-Ultrawide'
-    config_home="$HOME/.config/moonlight-center"
-    host="${mac_host}:48189"
-    resolution='3440x1440'
-    fps=120
-    bitrate=60000
-    target_x=1200
-    target_y=309
-    ;;
-  right:stable)
-    title='Mac-Right-Landscape'
-    config_home="$HOME/.config/moonlight-right"
-    host="${mac_host}:48389"
-    resolution='1920x1080'
-    fps=60
-    bitrate=20000
-    target_x=4640
-    target_y=451
-    ;;
-  left:high)
-    title='Mac-Left-Portrait'
-    config_home="$HOME/.config/moonlight-left"
-    host="${mac_host}:47989"
-    resolution='1200x2133'
-    fps=60
-    bitrate=60000
-    target_x=0
-    target_y=0
-    ;;
-  center:high)
-    title='Mac-Center-Ultrawide'
-    config_home="$HOME/.config/moonlight-center"
-    host="${mac_host}:48189"
-    resolution='3440x1440'
-    fps=120
-    bitrate=60000
-    target_x=1200
-    target_y=309
-    ;;
-  right:high)
-    title='Mac-Right-Landscape'
-    config_home="$HOME/.config/moonlight-right"
-    host="${mac_host}:48389"
-    resolution='1920x1080'
-    fps=60
-    bitrate=20000
-    target_x=4640
-    target_y=451
-    ;;
-  *)
-    echo "usage: $0 left|center|right" >&2
-    exit 2
-    ;;
-esac
+screen_vars=$("$cfg" screen "$side") || exit 2
+eval "$screen_vars"
+primary=$("$cfg" primary)
+title=$s_title
+config_home="$HOME/.config/moonlight-$side"
+host="${mac_host}:$s_port"
+resolution="${s_width}x${s_height}"
+fps=$s_fps
+bitrate=$s_bitrate_kbps
+target_x=$s_window_x
+target_y=$s_window_y
 
 export XDG_CONFIG_HOME="$config_home"
 export QT_QPA_PLATFORM=xcb
@@ -162,7 +108,7 @@ if [ -z "${XAUTHORITY:-}" ]; then
   export XAUTHORITY
 fi
 
-if [ "$side" != center ]; then
+if [ "$side" != "$primary" ]; then
   export SDL_AUDIODRIVER=dummy
 fi
 
@@ -228,10 +174,10 @@ child_pid=$!
 heartbeat_pid=$!
 
 # Move the Mac pointer 1px and back every MAC_JITTER_SECONDS (default 60, 0 =
-# off) while the stream runs; set it in ~/.config/mac-three-screens/environment.
-# Center only, so three streams do not triple it.
-jitter_seconds=${MAC_JITTER_SECONDS:-60}
-if [ "$side" = center ] && [ "$jitter_seconds" -gt 0 ] 2>/dev/null; then
+# off) while the stream runs; set it in ~/.config/mac-three-screens/config.
+# Primary screen only, so several streams do not multiply it.
+jitter_seconds=$("$cfg" get MAC_JITTER_SECONDS 60)
+if [ "$side" = "$primary" ] && [ "$jitter_seconds" -gt 0 ] 2>/dev/null; then
   (
     while kill -0 "$child_pid" 2>/dev/null; do
       sleep "$jitter_seconds"
@@ -267,7 +213,7 @@ for _ in $(seq 1 100); do
     xdotool key --window "$window_id" ctrl+alt+shift+l 2>/dev/null || true
     # The side streams are viewers. Keep their keyboard/mouse capture off so
     # they cannot overwrite the global Mac pointer controlled by the bridge.
-    if [ "$side" != center ]; then
+    if [ "$side" != "$primary" ]; then
       xdotool key --window "$window_id" ctrl+alt+shift+z 2>/dev/null || true
     fi
     for candidate in $(xdotool search --class moonlight 2>/dev/null); do

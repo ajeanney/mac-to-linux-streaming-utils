@@ -1,0 +1,10 @@
+[Unit]
+Description=Moonlight stream of Mac screen %i
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/moonlight-mac-display %i
+Restart=on-failure
+RestartSec=2
+StandardOutput=append:%h/.local/state/mac-three-screens/%i.log
+StandardError=append:%h/.local/state/mac-three-screens/%i.log

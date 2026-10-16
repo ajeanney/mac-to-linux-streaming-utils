@@ -3,7 +3,6 @@ Description=Mouse bridge for the Mac three-screen Moonlight desktop
 After=graphical-session.target
 
 [Service]
-EnvironmentFile=-%h/.config/mac-three-screens/environment
 Type=simple
 ExecStart=%h/.local/bin/mac-mouse-bridge
 Environment=DISPLAY=:0

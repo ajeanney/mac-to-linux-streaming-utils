@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import ctypes
+import importlib.machinery
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -8,7 +10,12 @@ import subprocess
 import threading
 import time
 
-MAC_ADDRESS = os.environ.get("MAC_MOUSE_BRIDGE_ADDRESS", "FR-K3KFKV6TFX.local")
+_loader = importlib.machinery.SourceFileLoader(
+    "screens_config", str(Path(__file__).resolve().with_name("mac-three-screens-config")))
+screens_config = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
+_loader.exec_module(screens_config)
+
+MAC_ADDRESS = screens_config.load().get("MAC_HOST", "")
 MAC_PORT = 45991
 DISPLAY = os.environ.get("DISPLAY", ":0")
 
@@ -110,14 +117,15 @@ def resolve_mac_address(host):
             best_elapsed = elapsed
     return best_address or candidates[0]
 
-# These are the current BetterDisplay coordinates after arranging the Mac
-# desktop as portrait -> ultrawide -> landscape. They are global macOS
-# desktop coordinates, so the portrait display intentionally starts at x=-1080.
+# Each screen's rectangle in global macOS desktop coordinates (logical points),
+# keyed by its Moonlight window title. A display left of the main one has
+# negative x. The primary screen owns keyboard focus; the rest are viewers.
+_SCREENS = screens_config.screens()
 MAC_DISPLAYS = {
-    "Mac-Left-Portrait": (-1080, -184, 1080, 1920),
-    "Mac-Center-Ultrawide": (0, 0, 3440, 1440),
-    "Mac-Right-Landscape": (3440, 153, 1920, 1080),
+    s["title"]: (s["mac_x"], s["mac_y"], s["mac_width"], s["mac_height"]) for s in _SCREENS
 }
+PRIMARY_TITLE = next(s["title"] for s in _SCREENS if s["primary"])
+SIDE_TITLES = tuple(s["title"] for s in _SCREENS if not s["primary"])
 
 WINDOWS = {}
 WINDOWS_LOCK = threading.Lock()
@@ -144,7 +152,7 @@ def send_unchecked(message):
 def input_enabled():
     global INPUT_ACTIVE, last_sent_shift, last_sent_command, last_sent_control
     with INPUT_LOCK:
-        center = window_id_for("Mac-Center-Ultrawide")
+        center = window_id_for(PRIMARY_TITLE)
         enabled = bool(center and POINTER and POINTER.is_visible(center))
         if INPUT_ACTIVE and not enabled:
             for button in PRESSED_BUTTONS:
@@ -322,7 +330,7 @@ def refresh_windows():
         except (OSError, subprocess.TimeoutExpired):
             continue
 
-        target = next((name for name in MAC_DISPLAYS if title.startswith(name)), None)
+        target = max((name for name in MAC_DISPLAYS if title.startswith(name)), key=len, default=None)
         if not target:
             continue
         values = dict(re.findall(r"^(X|Y|WIDTH|HEIGHT)=(\d+)$", geometry, re.MULTILINE))
@@ -379,7 +387,7 @@ def window_id_for(name):
 def reset_side_input(name):
     if not input_enabled():
         return
-    if name not in ("Mac-Left-Portrait", "Mac-Right-Landscape"):
+    if name not in SIDE_TITLES:
         return
     window_id = window_id_for(name)
     if not window_id or not POINTER.is_visible(window_id):
@@ -395,7 +403,7 @@ def reset_side_input(name):
         )
     except (OSError, subprocess.TimeoutExpired):
         pass
-    center_id = window_id_for("Mac-Center-Ultrawide")
+    center_id = window_id_for(PRIMARY_TITLE)
     if center_id and input_enabled():
         try:
             subprocess.run(
@@ -490,8 +498,7 @@ def input_reader():
                             send_current()
                         send(f"B {button} {1 if event == 'press' else 0}")
                         if button == 1 and event == "release":
-                            if left_press_target in (
-                                    "Mac-Left-Portrait", "Mac-Right-Landscape"):
+                            if left_press_target in SIDE_TITLES:
                                 reset_side_input(left_press_target)
                             left_press_target = None
                     elif event == "press" and button in (4, 5, 6, 7):
@@ -552,6 +559,8 @@ def window_refresher():
 
 def main():
     global DESTINATION, POINTER
+    if not MAC_ADDRESS:
+        raise SystemExit(f"MAC_HOST is not set in {screens_config.PATH}")
     # KDE creates a new XWayland authorization file each login.
     os.environ.setdefault("DISPLAY", DISPLAY)
     if not os.environ.get("XAUTHORITY"):

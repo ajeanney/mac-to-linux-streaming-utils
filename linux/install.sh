@@ -29,9 +29,21 @@ for source in "$root"/linux/systemd/*.service; do
 done
 mkdir -p "$HOME/.local/lib"
 cc -shared -fPIC -O2 "$root/linux/bin/moonlight-show-cursor.c" -o "$HOME/.local/lib/moonlight-show-cursor.so" -ldl
-if [[ ! -e "$HOME/.config/mac-three-screens/environment" ]]; then
-  cp "$root/linux/environment.example" "$HOME/.config/mac-three-screens/environment"
+config="$HOME/.config/mac-three-screens/config"
+legacy="$HOME/.config/mac-three-screens/environment"
+if [[ ! -e "$config" ]]; then
+  if [[ -e "$legacy" ]] && grep -q '^MAC_MOUSE_BRIDGE_ADDRESS=' "$legacy"; then
+    # Older installs kept just the Mac address here.
+    sed -e 's/^MAC_MOUSE_BRIDGE_ADDRESS=/MAC_HOST=/' "$legacy" > "$config"
+  else
+    cp "$root/config.example" "$config"
+  fi
+  echo "Created $config; set MAC_HOST and your screens in it (see examples/)." >&2
 fi
+for unit in left center right; do
+  rm -f "$HOME/.config/systemd/user/mac-three-screens-$unit.service"
+done
+"$HOME/.local/bin/mac-three-screens-config" check linux
 
 if [[ "$mode" != --no-start ]]; then
   for variable in DISPLAY XAUTHORITY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do
