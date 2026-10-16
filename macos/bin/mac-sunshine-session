@@ -51,7 +51,10 @@ def command(*args, check=True):
 
 
 def connected(tag, value):
-    return command('set', f'-tagID={tag}', f'-connected={value}', check=False).returncode == 0
+    if is_connected(tag, value):
+        return True
+    result = command('set', f'-tagID={tag}', f'-connected={value}', check=False)
+    return result.returncode == 0 or is_connected(tag, value)
 
 
 def is_connected(tag, expected):
@@ -65,7 +68,10 @@ def display_id(tag):
     if result.returncode:
         return None
     try:
-        value = json.loads(result.stdout).get('displayID')
+        identifiers = json.loads(result.stdout)
+        if identifiers.get('UUID') == 'UNKNOWN':
+            return None
+        value = identifiers.get('displayID')
     except (json.JSONDecodeError, AttributeError):
         return None
     return str(value) if str(value).isdigit() and int(value) > 0 else None
@@ -175,10 +181,13 @@ def power_on():
     for tag in DISPLAYS.values():
         if not connected(tag, 'on'):
             raise RuntimeError(f'Could not connect BetterDisplay virtual screen {tag}')
-    command('set', '-tagID=6', '-main=on')
+    ids = wait_for_display_ids()
+    center = f'-displayID={ids["center"]}'
+    if command('get', center, '-main', check=False).stdout.strip() != 'on':
+        command('set', center, '-main=on')
     dim_internal()
     keyboard_backlight_off()
-    return wait_for_display_ids()
+    return ids
 
 
 def prepare():
@@ -268,10 +277,19 @@ def main(args):
     # and a 90 second prepare used to block them until the client gave up.
     if args == ['prepare']:
         refresh_wake_lease()
-        prepare()
+        try:
+            prepare()
+        except (OSError, RuntimeError):
+            with LOCK.open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                leases = read_leases()
+                leases.pop(WAKE, None)
+                write_leases(leases)
+            if not leases:
+                restore()
+            raise
         return 0
-    if len(args) == 2 and args[0] == 'acquire' and args[1] in DISPLAYS:
-        power_on()
+    # Sunshine already opened capture before this hook; only acquire its lease.
     with LOCK.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         leases = read_leases()
@@ -293,6 +311,11 @@ def main(args):
             leases.pop(WAKE, None)
             write_leases(leases)
             return 0
+        elif args == ['release', 'all']:
+            # The Linux stop command has stopped every unit, including any
+            # startup hold left by a stream that never finished connecting.
+            leases = {}
+            write_leases(leases)
         elif len(args) == 2 and args[0] == 'release' and args[1] in DISPLAYS:
             # A stream that ended on purpose should not wait out its lease.
             leases.pop(args[1], None)
