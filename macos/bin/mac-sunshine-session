@@ -6,6 +6,8 @@ would leak after any disconnect. Each stream instead refreshes a lease here
 while it runs; once every lease is stale the virtual screens go back off.
 """
 import fcntl
+import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import socket
@@ -13,23 +15,30 @@ import subprocess
 import sys
 import time
 
+_loader = importlib.machinery.SourceFileLoader(
+    'screens_config', str(Path(__file__).resolve().with_name('mac-three-screens-config')))
+screens_config = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
+_loader.exec_module(screens_config)
+
 BETTERDISPLAY = Path('/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay')
 CAFFEINATE = Path('/usr/bin/caffeinate')
 CONFIG = Path.home() / '.config'
 STATE = CONFIG / 'sunshine-three-sessions.json'
 LOCK = CONFIG / 'sunshine-three-sessions.lock'
-DISPLAYS = {'left': 5, 'center': 6, 'right': 3}
-PORTS = {'left': 47989, 'center': 48189, 'right': 48389}
+_SCREENS = screens_config.screens()
+DISPLAYS = {screen['name']: screen['tag'] for screen in _SCREENS}
+PORTS = {screen['name']: screen['port'] for screen in _SCREENS}
+PRIMARY = next(screen['name'] for screen in _SCREENS if screen['primary'])
 # Linux refreshes every 45s, so one missed beat is not a disconnect.
 LEASE_SECONDS = 150
 # A wake request holds the screens up while Sunshine restarts around the new
 # display IDs. Linux re-sends it every second until the Mac answers.
 WAKE = 'wake'
 WAKE_SECONDS = 60
-# macOS refuses to disconnect the built-in panel of an Apple silicon Mac
-# ("set -tagID=2 -connected=off" and -disconnectAllButMain both fail here), so
-# streaming blanks it by dropping its brightness instead.
-INTERNAL = 2
+# macOS refuses to disconnect the built-in panel of an Apple silicon Mac, so
+# streaming blanks it by dropping its brightness instead. Only done when the
+# user names its BetterDisplay tag (INTERNAL_SCREEN_TAG); otherwise left alone.
+INTERNAL = screens_config.load().get('INTERNAL_SCREEN_TAG') or None
 INTERNAL_BRIGHTNESS = CONFIG / 'sunshine-three-internal-brightness'
 # Saved brightness and ambient-light setting are restored after streaming.
 KEYBOARD_BACKLIGHT = CONFIG / 'sunshine-three-keyboard-backlight'
@@ -84,7 +93,7 @@ def wait_for_display_ids(timeout=60):
         if all(ids.values()):
             return ids
         time.sleep(1)
-    raise RuntimeError('BetterDisplay did not connect all three virtual displays')
+    raise RuntimeError('BetterDisplay did not connect all the virtual displays')
 
 
 def sunshine_ready(ids):
@@ -114,6 +123,8 @@ def internal_brightness():
 
 
 def dim_internal():
+    if INTERNAL is None:
+        return
     try:
         saved = float(INTERNAL_BRIGHTNESS.read_text().strip())
     except (OSError, ValueError):
@@ -135,6 +146,8 @@ def wake_panel():
 
 
 def undim_internal():
+    if INTERNAL is None:
+        return
     try:
         saved = float(INTERNAL_BRIGHTNESS.read_text().strip())
     except (OSError, ValueError):
@@ -144,7 +157,7 @@ def undim_internal():
 
 
 def keyboard_backlight(off):
-    # Three Sunshine acquire hooks may run together: save the original once.
+    # Several Sunshine acquire hooks may run together: save the original once.
     with KEYBOARD_SAVED.with_suffix('.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
@@ -182,9 +195,9 @@ def power_on():
         if not connected(tag, 'on'):
             raise RuntimeError(f'Could not connect BetterDisplay virtual screen {tag}')
     ids = wait_for_display_ids()
-    center = f'-displayID={ids["center"]}'
-    if command('get', center, '-main', check=False).stdout.strip() != 'on':
-        command('set', center, '-main=on')
+    primary = f'-displayID={ids[PRIMARY]}'
+    if command('get', primary, '-main', check=False).stdout.strip() != 'on':
+        command('set', primary, '-main=on')
     dim_internal()
     keyboard_backlight_off()
     return ids

@@ -7,7 +7,7 @@
       "name": "Desktop",
       "prep-cmd": [
         {
-          "do": "@HOME@/.local/bin/mac-sunshine-session acquire @SIDE@"
+          "do": "@HOME@/.local/bin/mac-sunshine-session acquire @NAME@"
         }
       ]
     }

@@ -1,0 +1,17 @@
+sunshine_name = @TITLE@
+output_name = 0
+port = @PORT@
+encoder = videotoolbox
+vt_realtime = enabled
+minimum_fps_target = @FPS@
+stream_audio = false
+mouse = disabled
+keyboard = @KEYBOARD@
+keybindings = [ 0xC0, 0xE2 ]
+origin_web_ui_allowed = lan
+file_apps = @HOME@/.config/sunshine-@NAME@/apps.json
+file_state = @HOME@/.config/sunshine-@NAME@/sunshine_state.json
+credentials_file = @HOME@/.config/sunshine-@NAME@/credentials.json
+pkey = @HOME@/.config/sunshine-@NAME@/credentials/cakey.pem
+cert = @HOME@/.config/sunshine-@NAME@/credentials/cacert.pem
+log_path = @HOME@/.config/sunshine-@NAME@/sunshine.log

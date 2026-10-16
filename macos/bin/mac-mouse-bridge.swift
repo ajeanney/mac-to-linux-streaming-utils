@@ -8,11 +8,11 @@ if !CGPreflightPostEventAccess() {
 }
 
 let port = NWEndpoint.Port(rawValue: 45991)!
-let queue = DispatchQueue(label: "com.anthony.mac-mouse-bridge")
-let sessionQueue = DispatchQueue(label: "com.anthony.mac-sunshine-session")
+let queue = DispatchQueue(label: "com.mac-three-screens.mouse-bridge")
+let sessionQueue = DispatchQueue(label: "com.mac-three-screens.session")
 // Releases are quick and must never queue behind a slow prepare, so they get
 // their own queue instead of sharing the session work.
-let releaseQueue = DispatchQueue(label: "com.anthony.mac-sunshine-session-release")
+let releaseQueue = DispatchQueue(label: "com.mac-three-screens.session-release")
 var sessionBusy = false
 var lastPoint = CGEvent(source: nil)?.location ?? CGPoint(x: 0, y: 0)
 var pressedButtons = Set<Int>()

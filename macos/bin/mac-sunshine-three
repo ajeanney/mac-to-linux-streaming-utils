@@ -5,6 +5,7 @@ set -u
 betterdisplay='/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay'
 sunshine_app='/Applications/Sunshine.app'
 session_helper="$HOME/.local/bin/mac-sunshine-session"
+cfg="$HOME/.local/bin/mac-three-screens-config"
 config_root="$HOME/.config"
 lock_file="$config_root/sunshine-three-supervisor.lock"
 # Written by mac-sunshine-session once the Mac is back to normal. While it
@@ -18,6 +19,18 @@ if [[ "${1:-}" != --locked ]]; then
   exec /usr/bin/lockf -k -t 0 "$lock_file" /bin/zsh "$0" --locked
 fi
 trap 'exit 0' INT TERM
+
+"$cfg" check mac || exit 1
+names=(${(f)"$("$cfg" primary; "$cfg" names)"})
+primary=$names[1]
+names=(${names[2,-1]})
+typeset -A tags ports ids
+for name in $names; do
+  eval "$("$cfg" screen $name)"
+  tags[$name]=$s_tag
+  ports[$name]=$s_port
+done
+unmirror_from=$("$cfg" get UNMIRROR_FROM 'Color LCD')
 
 # Clear leases left behind by a forced logout or a Sunshine crash.
 "$session_helper" expire >/dev/null 2>&1 || true
@@ -34,14 +47,19 @@ sunshine_port_open() {
 }
 
 set_display_ids() {
-  right_id=$(display_id_for_tag 3)
-  left_id=$(display_id_for_tag 5)
-  center_id=$(display_id_for_tag 6)
-  [[ -n "$right_id" && -n "$left_id" && -n "$center_id" ]]
+  local name id
+  for name in $names; do
+    id=$(display_id_for_tag "$tags[$name]")
+    [[ -n "$id" ]] || return 1
+    ids[$name]=$id
+  done
 }
 
 sunshine_ports_ready() {
-  sunshine_port_open 47989 && sunshine_port_open 48189 && sunshine_port_open 48389
+  local name
+  for name in $names; do
+    sunshine_port_open "$ports[$name]" || return 1
+  done
 }
 
 config_output_name() {
@@ -89,20 +107,19 @@ restart_sunshine() {
   fi
   # Turning the virtual screens off can leave macOS in a mirrored
   # arrangement. Restore the extended desktop before Sunshine probes capture.
-  "$betterdisplay" set -displayID="$center_id" -mirror=off \
-    -targetnamelike='Color LCD,Virtuel 16:9' >/dev/null 2>&1 || true
+  "$betterdisplay" set -displayID="$ids[$primary]" -mirror=off \
+    -targetnamelike="$unmirror_from" >/dev/null 2>&1 || true
 
-  sed -i '' "s/^output_name = .*/output_name = $left_id/" \
-    "$config_root/sunshine-left/sunshine.conf"
-  sed -i '' "s/^output_name = .*/output_name = $center_id/" \
-    "$config_root/sunshine-center/sunshine.conf"
-  sed -i '' "s/^output_name = .*/output_name = $right_id/" \
-    "$config_root/sunshine-right/sunshine.conf"
+  local name
+  for name in $names; do
+    sed -i '' "s/^output_name = .*/output_name = $ids[$name]/" \
+      "$config_root/sunshine-$name/sunshine.conf"
+  done
 
   stop_sunshine
-  start_instance left 47989 || true
-  start_instance center 48189 || true
-  start_instance right 48389 || true
+  for name in $names; do
+    start_instance $name $ports[$name] || true
+  done
 }
 
 sleep 12
@@ -136,12 +153,10 @@ while true; do
   fi
 
   needs_restart=0
-  [[ "$(config_output_name "$config_root/sunshine-left/sunshine.conf")" == "$left_id" ]] || needs_restart=1
-  [[ "$(config_output_name "$config_root/sunshine-center/sunshine.conf")" == "$center_id" ]] || needs_restart=1
-  [[ "$(config_output_name "$config_root/sunshine-right/sunshine.conf")" == "$right_id" ]] || needs_restart=1
-  sunshine_port_open 47989 || needs_restart=1
-  sunshine_port_open 48189 || needs_restart=1
-  sunshine_port_open 48389 || needs_restart=1
+  for name in $names; do
+    [[ "$(config_output_name "$config_root/sunshine-$name/sunshine.conf")" == "$ids[$name]" ]] || needs_restart=1
+    sunshine_port_open "$ports[$name]" || needs_restart=1
+  done
 
   if (( needs_restart )); then
     restart_sunshine

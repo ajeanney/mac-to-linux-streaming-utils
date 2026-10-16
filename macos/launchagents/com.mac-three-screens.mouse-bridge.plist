@@ -3,22 +3,20 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.anthony.sunshine-three</string>
+  <string>com.mac-three-screens.mouse-bridge</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@HOME@/.local/bin/mac-sunshine-three</string>
+    <string>@HOME@/.local/bin/mac-mouse-bridge</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
-  <!-- Without this, a supervisor that dies for any reason silently stops
-       refreshing Sunshine's capture IDs and every stream fails with 503. -->
   <key>KeepAlive</key>
   <true/>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>StandardOutPath</key>
-  <string>@HOME@/.config/sunshine-three-autostart.log</string>
+  <string>@HOME@/.config/mac-mouse-bridge.log</string>
   <key>StandardErrorPath</key>
-  <string>@HOME@/.config/sunshine-three-autostart.log</string>
+  <string>@HOME@/.config/mac-mouse-bridge.log</string>
 </dict>
 </plist>
