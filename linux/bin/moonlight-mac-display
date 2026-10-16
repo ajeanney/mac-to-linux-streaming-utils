@@ -195,6 +195,12 @@ cleanup() {
 }
 trap cleanup INT TERM
 
+# Keep the real Linux cursor visible over every stream (see the shim source).
+cursor_shim="$HOME/.local/lib/moonlight-show-cursor.so"
+if [ -f "$cursor_shim" ]; then
+  export LD_PRELOAD="$cursor_shim${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
 /usr/bin/moonlight stream \
   --resolution "$resolution" \
   --fps "$fps" \
@@ -244,11 +250,6 @@ for _ in $(seq 1 100); do
     xdotool windowfocus "$window_id" 2>/dev/null || true
     sleep 0.2
     xdotool key --window "$window_id" ctrl+alt+shift+l 2>/dev/null || true
-    # Keep the Linux cursor visible in the keyboard-focused center stream.
-    # The Moonlight client-cursor toggle can stop rendering after pointer leave/enter.
-    if [ "$side" = center ]; then
-      xdotool key --window "$window_id" ctrl+alt+shift+c 2>/dev/null || true
-    fi
     # The side streams are viewers. Keep their keyboard/mouse capture off so
     # they cannot overwrite the global Mac pointer controlled by the bridge.
     if [ "$side" != center ]; then

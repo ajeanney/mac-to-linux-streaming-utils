@@ -22,11 +22,13 @@ link_file() {
 }
 
 for source in "$root"/linux/bin/*; do
-  if [[ -f "$source" ]]; then link_file "$source" "$HOME/.local/bin/$(basename "$source")"; fi
+  if [[ -f "$source" && "$source" != *.c ]]; then link_file "$source" "$HOME/.local/bin/$(basename "$source")"; fi
 done
 for source in "$root"/linux/systemd/*.service; do
   link_file "$source" "$HOME/.config/systemd/user/$(basename "$source")"
 done
+mkdir -p "$HOME/.local/lib"
+cc -shared -fPIC -O2 "$root/linux/bin/moonlight-show-cursor.c" -o "$HOME/.local/lib/moonlight-show-cursor.so" -ldl
 if [[ ! -e "$HOME/.config/mac-three-screens/environment" ]]; then
   cp "$root/linux/environment.example" "$HOME/.config/mac-three-screens/environment"
 fi
