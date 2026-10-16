@@ -15,3 +15,5 @@ environment.local
 *.before-*
 *.bak
 
+AGENTS.local.md
+agents-*.md
