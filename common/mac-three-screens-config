@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Read ~/.config/mac-three-screens/config (KEY=value lines, '#' comments).
+
+Used as a module by the Python tools and as a command by the shell tools:
+
+  mac-three-screens-config names            screen names, one per line
+  mac-three-screens-config primary          the screen that owns keyboard focus
+  mac-three-screens-config get KEY [DEFAULT]
+  mac-three-screens-config screen NAME      shell assignments, eval-able (s_*)
+  mac-three-screens-config check linux|mac  report what is missing; exit 2
+"""
+import os
+from pathlib import Path
+import re
+import shlex
+import sys
+
+PATH = Path(os.environ.get('MAC_THREE_SCREENS_CONFIG') or Path.home() / '.config/mac-three-screens/config')
+NAME = re.compile(r'[a-z0-9]+(-[a-z0-9]+)*')
+
+
+class ConfigError(Exception):
+    pass
+
+
+def load(path=None):
+    values = {}
+    try:
+        text = (path or PATH).read_text()
+    except OSError:
+        return values
+    for line in text.splitlines():
+        key, sep, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if not sep or key.startswith('#') or not re.fullmatch(r'[A-Z][A-Z0-9_]*', key):
+            continue
+        if len(value) > 1 and value[0] == value[-1] and value[0] in '"\'':
+            value = value[1:-1]
+        elif ' #' in value:
+            value = value.split(' #', 1)[0].rstrip()
+        values[key] = value
+    return values
+
+
+def screens(values=None):
+    """Screens in config order, with defaults applied. Order sets the port."""
+    values = load() if values is None else values
+    names = values.get('SCREENS', 'main').split()
+    if not names:
+        raise ConfigError('SCREENS is empty')
+    primary = values.get('PRIMARY_SCREEN', names[0])
+    if primary not in names:
+        raise ConfigError(f'PRIMARY_SCREEN {primary!r} is not listed in SCREENS')
+    result = []
+    for index, name in enumerate(names):
+        if not NAME.fullmatch(name) or names.count(name) > 1:
+            raise ConfigError(f'screen name {name!r} must be unique lowercase letters, digits and dashes')
+        prefix = 'SCREEN_' + name.upper().replace('-', '_') + '_'
+
+        def number(key, default):
+            raw = values.get(prefix + key, '')
+            try:
+                return int(raw) if raw else default
+            except ValueError:
+                raise ConfigError(f'{prefix}{key} must be a whole number, got {raw!r}')
+
+        width, height = number('WIDTH', 1920), number('HEIGHT', 1080)
+        result.append({
+            'name': name,
+            'title': 'Mac-' + name,
+            'tag': values.get(prefix + 'TAG', ''),
+            'width': width, 'height': height,
+            'fps': number('FPS', 60),
+            'bitrate_kbps': number('BITRATE', 20) * 1000,
+            'window_x': number('WINDOW_X', 0), 'window_y': number('WINDOW_Y', 0),
+            'mac_x': number('MAC_X', 0), 'mac_y': number('MAC_Y', 0),
+            'mac_width': number('MAC_WIDTH', width), 'mac_height': number('MAC_HEIGHT', height),
+            'port': 47989 + 200 * index,
+            'primary': int(name == primary),
+        })
+    return result
+
+
+def problems(side, values=None):
+    values = load() if values is None else values
+    found = []
+    if side == 'linux' and not values.get('MAC_HOST'):
+        found.append('MAC_HOST is not set (the Mac hostname or IP)')
+    try:
+        for screen in screens(values):
+            if side == 'mac' and not screen['tag']:
+                found.append(f"SCREEN_{screen['name'].upper().replace('-', '_')}_TAG is not set (BetterDisplay tag)")
+    except ConfigError as error:
+        found.append(str(error))
+    return found
+
+
+def main(args):
+    command = args[0] if args else ''
+    try:
+        if command == 'names':
+            print('\n'.join(screen['name'] for screen in screens()))
+        elif command == 'primary':
+            print(next(screen['name'] for screen in screens() if screen['primary']))
+        elif command == 'get' and len(args) in (2, 3):
+            value = load().get(args[1]) or (args[2] if len(args) == 3 else '')
+            print(value)
+            return 0 if value else 1
+        elif command == 'screen' and len(args) == 2:
+            match = next((s for s in screens() if s['name'] == args[1]), None)
+            if not match:
+                raise ConfigError(f'unknown screen {args[1]!r}; configured: {" ".join(s["name"] for s in screens())}')
+            for key, value in match.items():
+                print(f's_{key}={shlex.quote(str(value))}')
+        elif command == 'check' and len(args) == 2 and args[1] in ('linux', 'mac'):
+            found = problems(args[1])
+            for line in found:
+                print(f'{PATH}: {line}', file=sys.stderr)
+            return 2 if found else 0
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except ConfigError as error:
+        print(f'{PATH}: {error}', file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv[1:]))

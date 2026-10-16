@@ -1,7 +1,0 @@
-# Optional: use a reserved wired Mac IP or its Bonjour name for both video and mouse.
-# MAC_MOUSE_BRIDGE_ADDRESS=FR-K3KFKV6TFX.local
-
-
-# Seconds between the Mac pointer jitter (1px and back) while streaming.
-# 0 disables it. Default 60.
-# MAC_JITTER_SECONDS=60

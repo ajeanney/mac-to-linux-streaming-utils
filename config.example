@@ -1,0 +1,44 @@
+# mac-three-screens settings. Copy to ~/.config/mac-three-screens/config on the
+# Mac and on the Linux PC (the same file works on both; each side reads what it
+# needs). Lines starting with '#' are ignored.
+
+# Linux: the Mac's Bonjour name (my-mac.local) or a fixed wired IP. Required.
+MAC_HOST=
+
+# Linux: seconds between a 1 px pointer nudge on the Mac while streaming, so it
+# never idles. 0 turns it off.
+# MAC_JITTER_SECONDS=60
+
+# One stream per name, in port order (first = 47989, then +200 each). Names are
+# lowercase letters, digits and dashes. See examples/three-screens.config for
+# several screens.
+SCREENS=main
+# The screen whose window keeps keyboard focus and receives typing.
+# PRIMARY_SCREEN=main
+
+# --- Per-screen settings: SCREEN_<NAME>_<KEY>, name upper-cased, '-' -> '_' ---
+# Mac: BetterDisplay tag of the virtual display (required).
+#   /Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay get -identifiers
+SCREEN_MAIN_TAG=
+# Stream size in pixels and frame rate / bitrate (Mbps) requested from the Mac.
+# SCREEN_MAIN_WIDTH=1920
+# SCREEN_MAIN_HEIGHT=1080
+# SCREEN_MAIN_FPS=60
+# SCREEN_MAIN_BITRATE=20
+# Linux: where this stream's window goes on the Linux desktop (top-left pixel).
+# SCREEN_MAIN_WINDOW_X=0
+# SCREEN_MAIN_WINDOW_Y=0
+# Linux: the display's rectangle in the Mac's *logical* desktop coordinates,
+# used to map the pointer. Size defaults to the stream size.
+# SCREEN_MAIN_MAC_X=0
+# SCREEN_MAIN_MAC_Y=0
+# SCREEN_MAIN_MAC_WIDTH=1920
+# SCREEN_MAIN_MAC_HEIGHT=1080
+
+# --- Optional Mac settings ---
+# BetterDisplay tag of the built-in panel to blank while streaming (restored
+# afterwards). Leave unset to keep the built-in display as it is.
+# INTERNAL_SCREEN_TAG=
+# Display names to un-mirror the primary screen from after the virtual screens
+# were off (comma separated, as BetterDisplay's -targetnamelike).
+# UNMIRROR_FROM=Color LCD
