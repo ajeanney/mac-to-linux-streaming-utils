@@ -16,6 +16,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 root = Path(__file__).resolve().parents[1]
+# The three-screen example doubles as the fixture for the multi-screen tests.
+os.environ['MAC_THREE_SCREENS_CONFIG'] = str(root / 'examples/three-screens.config')
 loader = importlib.machinery.SourceFileLoader('bridge', str(root / 'linux/bin/mac-mouse-bridge'))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 bridge = importlib.util.module_from_spec(spec)
@@ -23,9 +25,9 @@ loader.exec_module(bridge)
 bridge.POINTER = SimpleNamespace(is_visible=lambda _: True)
 
 bridge.WINDOWS.update({
-    'Mac-Left-Portrait': (0, 0, 1200, 2133, 1),
-    'Mac-Center-Ultrawide': (1200, 309, 3440, 1440, 2),
-    'Mac-Right-Landscape': (4640, 451, 1920, 1080, 3),
+    'Mac-left': (0, 0, 1200, 2133, 1),
+    'Mac-center': (1200, 309, 3440, 1440, 2),
+    'Mac-right': (4640, 451, 1920, 1080, 3),
 })
 assert bridge.map_pointer((1200, 309)) == (0, 0)
 assert bridge.map_pointer((4640, 451)) == (3440, 153)
@@ -39,20 +41,20 @@ with tempfile.TemporaryDirectory() as folder:
     home = Path(folder)
     host_file = home / '.local/state/mac-three-screens/host'
     host_file.parent.mkdir(parents=True)
-    host_file.write_text('192.168.11.27\n')
+    host_file.write_text('10.0.0.27\n')
     with patch.object(bridge.Path, 'home', return_value=home), \
          patch.object(bridge.subprocess, 'run', return_value=SimpleNamespace(stdout='')):
         bridge.refresh_windows()
-        assert bridge.DESTINATION == ('192.168.11.27', bridge.MAC_PORT)
-        host_file.write_text('192.168.11.113\n')
+        assert bridge.DESTINATION == ('10.0.0.27', bridge.MAC_PORT)
+        host_file.write_text('10.0.0.113\n')
         bridge.refresh_windows()
-        assert bridge.DESTINATION == ('192.168.11.113', bridge.MAC_PORT)
+        assert bridge.DESTINATION == ('10.0.0.113', bridge.MAC_PORT)
         host_file.write_text('invalid address\n')
         bridge.refresh_windows()
-        assert bridge.DESTINATION == ('192.168.11.113', bridge.MAC_PORT)
+        assert bridge.DESTINATION == ('10.0.0.113', bridge.MAC_PORT)
 bridge.WINDOWS.update({
-    'Mac-Center-Ultrawide': (1200, 309, 3440, 1440, 2),
-    'Mac-Right-Landscape': (4640, 451, 1920, 1080, 3),
+    'Mac-center': (1200, 309, 3440, 1440, 2),
+    'Mac-right': (4640, 451, 1920, 1080, 3),
 })
 
 # A focus-induced cursor jump on release must not become a drag. Real
@@ -80,7 +82,7 @@ for events, expected_moves in ((press + release, 1), (press + motion + release, 
             pass
     assert len(moves) == expected_moves, (events, moves)
     assert [m for m in messages if m.startswith('B ')] == ['B 1 1', 'B 1 0']
-    assert resets == ['Mac-Right-Landscape']
+    assert resets == ['Mac-right']
 
 # Minimizing pauses all forwarded input, releases a held drag once, and never
 # activates the center from a side click. Restoring resumes without a restart.
@@ -100,7 +102,7 @@ with patch.object(bridge, 'POINTER', pointer), \
     messages.clear()
     for message in ('M 4000 400', 'B 1 1', 'B 1 0', 'W 80 0', 'D 1', 'I 1 0'):
         bridge.send(message)
-    bridge.reset_side_input('Mac-Right-Landscape')
+    bridge.reset_side_input('Mac-right')
     assert messages == []
     run.assert_not_called()
     visible.add(2)
@@ -113,7 +115,7 @@ with patch.object(bridge, 'POINTER', pointer), \
     visible.remove(3)
     assert bridge.map_pointer((4700, 550)) is None
     assert bridge.screen_at((4700, 550)) is None
-    bridge.reset_side_input('Mac-Right-Landscape')
+    bridge.reset_side_input('Mac-right')
     run.assert_not_called()
 
 # Compile the native helper on macOS and exercise its argument boundary
@@ -133,7 +135,8 @@ with tempfile.TemporaryDirectory() as folder:
     commands.mkdir(parents=True)
     state = home / '.local/state/mac-three-screens'
     state.mkdir(parents=True)
-    (state / 'host').write_text('192.168.11.27\n')
+    (state / 'host').write_text('10.0.0.27\n')
+    shutil.copy(root / 'common/mac-three-screens-config', commands / 'mac-three-screens-config')
     for name in ('systemctl', 'mac-screens-wake'):
         script = commands / name
         script.write_text('#!/bin/sh\necho "' + name + ' $*" >> "$HOME/calls"\n')
@@ -142,7 +145,7 @@ with tempfile.TemporaryDirectory() as folder:
     subprocess.run(['bash', str(root / 'linux/bin/mac-three-screens'), 'stop'], env=env, check=True)
     calls = (home / 'calls').read_text().splitlines()
     assert calls[0].startswith('systemctl --user stop ')
-    assert calls[1] == 'mac-screens-wake release 192.168.11.27 all'
+    assert calls[1] == 'mac-screens-wake release 10.0.0.27 all'
 
     # Simulate the video surface dropping fullscreen after its initial setup.
     launcher = (root / 'linux/bin/moonlight-mac-display').read_text()
@@ -169,7 +172,7 @@ else echo "$*" >> "$HOME/fullscreen-calls"; fi''',
         'windowstate --add FULLSCREEN 456']
 
 for source in (root / 'linux/bin').iterdir():
-    if source.is_file() and source.suffix != '.c' and source.name not in {'mac-mouse-bridge', 'mac-screens-wake'}:
+    if source.is_file() and source.suffix != '.c' and source.name not in {'mac-mouse-bridge', 'mac-screens-wake', 'mac-three-screens-config'}:
         subprocess.run(['bash', '-n', str(source)], check=True)
 for source in (root / 'macos/install.sh', root / 'linux/install.sh'):
     subprocess.run(['bash', '-n', str(source)], check=True)
@@ -177,11 +180,11 @@ if shutil.which('zsh'):
     subprocess.run(['zsh', '-n', str(root / 'macos/bin/mac-sunshine-three')], check=True)
 for source in (root / 'macos/launchagents').glob('*.plist'):
     plistlib.loads(source.read_bytes())
-agent = plistlib.loads((root / 'macos/launchagents/com.anthony.mac-mouse-bridge.plist').read_bytes())
+agent = plistlib.loads((root / 'macos/launchagents/com.mac-three-screens.mouse-bridge.plist').read_bytes())
 assert agent['ProgramArguments'] == ['@HOME@/.local/bin/mac-mouse-bridge']
 assert agent['KeepAlive'] is True
 for side in ('left', 'center', 'right'):
-    apps = json.loads((root / 'macos/sunshine/apps.json').read_text().replace('@SIDE@', side))
+    apps = json.loads((root / 'macos/sunshine/apps.json').read_text().replace('@NAME@', side))
     hook = apps['apps'][0]['prep-cmd'][0]
     assert hook['do'].endswith(f'acquire {side}')
     # Sunshine never runs `undo` for Desktop, so the lease must expire on its own.
@@ -372,8 +375,45 @@ mac_bridge = (root / 'macos/bin/mac-mouse-bridge.swift').read_text()
 assert 'process.standardInput = FileHandle.nullDevice' in mac_bridge
 assert 'process.standardOutput = log' in mac_bridge and 'process.standardError = log' in mac_bridge
 assert 'heartbeat "$mac_host"' in (root / 'linux/bin/moonlight-mac-display').read_text()
-for side in ('left', 'right'):
-    config = (root / f'macos/sunshine/{side}/sunshine.conf.in').read_text()
-    assert 'keyboard = disabled' in config and 'mouse = disabled' in config
-assert 'keyboard = enabled' in (root / 'macos/sunshine/center/sunshine.conf.in').read_text()
-print('OK: pointer mapping, click/drag regression, scripts, service templates and Sunshine input settings')
+template = (root / 'macos/sunshine/sunshine.conf.in').read_text()
+assert 'mouse = disabled' in template and 'keyboard = @KEYBOARD@' in template
+assert 'output_name = 0' in template and 'port = @PORT@' in template
+
+# The reader behind every script: defaults describe one screen, and the
+# example layout reproduces the three-screen setup.
+config_loader = importlib.machinery.SourceFileLoader('screens_config', str(root / 'common/mac-three-screens-config'))
+cfg = importlib.util.module_from_spec(importlib.util.spec_from_loader(config_loader.name, config_loader))
+config_loader.exec_module(cfg)
+single = cfg.screens({})
+assert [(s['name'], s['port'], s['primary'], s['width'], s['mac_width']) for s in single] == [('main', 47989, 1, 1920, 1920)]
+assert cfg.problems('linux', {}) == ['MAC_HOST is not set (the Mac hostname or IP)']
+assert any('SCREEN_MAIN_TAG' in p for p in cfg.problems('mac', {}))
+assert cfg.problems('mac', {'SCREEN_MAIN_TAG': '4'}) == [] and cfg.problems('linux', {'MAC_HOST': 'mac.local'}) == []
+example = cfg.load(root / 'examples/three-screens.config')
+three = cfg.screens(example)
+assert [(s['name'], s['port'], s['primary']) for s in three] == [('left', 47989, 0), ('center', 48189, 1), ('right', 48389, 0)]
+assert three[1]['bitrate_kbps'] == 60000 and three[0]['mac_x'] == -1080 and three[2]['mac_width'] == 1920
+assert cfg.problems('mac', example) == [] and cfg.problems('linux', example) == []
+assert cfg.load(root / 'config.example').get('SCREENS') == 'main'
+assert cfg.screens({'SCREENS': 'a b-2', 'PRIMARY_SCREEN': 'b-2', 'SCREEN_B_2_FPS': '30'})[1]['fps'] == 30
+for bad in ({'SCREENS': 'Left'}, {'SCREENS': 'a a'}, {'SCREENS': 'a', 'PRIMARY_SCREEN': 'b'},
+            {'SCREENS': 'a', 'SCREEN_A_FPS': 'fast'}, {'SCREENS': ' '}):
+    try:
+        cfg.screens(bad)
+    except cfg.ConfigError:
+        pass
+    else:
+        raise AssertionError(bad)
+with patch('sys.stderr', io.StringIO()):
+    assert cfg.main(['screen', 'nope']) == 2
+
+# The project must stay generic: nothing tied to the original author's machines.
+tracked = subprocess.Popen(['git', '-C', str(root), 'ls-files'], stdout=subprocess.PIPE, text=True).communicate()[0].split()
+for name in tracked:
+    path = root / name
+    if path.is_file() and not path.is_symlink() and path.suffix not in {'.pyc'} and name != 'tests/check.py':
+        text = path.read_text(errors='ignore')
+        for private in ('FR-K3KFKV6TFX', 'com.anthony', '192.168.11'):
+            # The Mac installer retires the labels older installs used.
+            assert private not in text or (name, private) == ('macos/install.sh', 'com.anthony'), (name, private)
+print('OK: pointer mapping, click/drag regression, scripts, service templates, config reader and Sunshine input settings')
