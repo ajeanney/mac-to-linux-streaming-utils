@@ -1,6 +1,6 @@
-# Mac three screens on Linux
+# Mac to Linux screen streaming
 
-Streams three BetterDisplay virtual Mac displays to three monitors on a Linux laptop. Three Sunshine instances (Mac) feed three Moonlight windows (Linux). Mouse and special keys travel over a custom UDP bridge, not through Moonlight. Personal use, trusted LAN, one Mac and one Linux machine.
+Streams one or more BetterDisplay virtual Mac displays to monitors on a Linux PC (default: one screen; a multi-monitor desk is configuration). One Sunshine instance per screen (Mac) feeds one Moonlight window per screen (Linux). Mouse and special keys travel over a custom UDP bridge, not through Moonlight. Trusted LAN, one Mac and one Linux machine. The repository is generic: nothing about a particular user's machines may live in tracked files; everything machine-specific is in `~/.config/mac-three-screens/config`.
 
 Also read, when they exist:
 - `AGENTS.local.md`: personal, uncommitted instructions for this machine (gitignored). Follow it.
@@ -11,14 +11,14 @@ Also read, when they exist:
 
 ```
 Linux laptop                                        Mac
-mac-three-screens start ─► 3 systemd user units ─► Moonlight x3 ══video═► Sunshine x3 (ports 47989/48189/48389)
-                           (left, center, right)                          capture BetterDisplay virtual screens
+mac-three-screens start ─► systemd units          ─► Moonlight xN ══video═► Sunshine xN (47989, +200 per screen)
+                           mac-three-screens@<name>                       capture BetterDisplay virtual screens
 mac-mouse-bridge.service ──UDP 45991 (M/B/W/K/P/L/J…)──► mac-mouse-bridge (Swift, launchd) ─► CGEvent
                                                          mac-sunshine-three (launchd supervisor)
                                                          mac-sunshine-session (leases, brightness)
 ```
 
-- Center stream owns keyboard focus and the cursor. Side streams are view-only (Sunshine `mouse = disabled`); the Linux bridge sends all pointer input for all three screens.
+- The primary screen (`PRIMARY_SCREEN`, default the first) owns keyboard focus and the cursor. The others are view-only (Sunshine `mouse = disabled`); the Linux bridge sends all pointer input for every screen.
 - Screens are only connected on the Mac while a stream holds a lease; they power off after the streams stop.
 - Audio stays on the Mac (`stream_audio = false`).
 
@@ -28,22 +28,23 @@ mac-mouse-bridge.service ──UDP 45991 (M/B/W/K/P/L/J…)──► mac-mouse-b
 | --- | --- |
 | `macos/install.sh` | Builds Swift bridge + keyboard helper, renders templates into `~/.config`, restarts launchd jobs |
 | `macos/bin/mac-mouse-bridge.swift` | UDP receiver on the Mac; posts mouse/key events, handles wake/heartbeat/release/jitter |
-| `macos/bin/mac-sunshine-three` | zsh supervisor (`lockf`, KeepAlive): resolves display IDs from BetterDisplay tags, runs the 3 Sunshine instances |
+| `macos/bin/mac-sunshine-three` | zsh supervisor (`lockf`, KeepAlive): resolves display IDs from BetterDisplay tags, runs one Sunshine instance per screen |
 | `macos/bin/mac-sunshine-session` | Python: lease state, display on/off, internal panel + keyboard backlight save/restore |
 | `macos/bin/mac-keyboard-backlight.m` | CoreBrightness helper (private API) |
-| `macos/sunshine/{left,center,right}/sunshine.conf.in`, `apps.json` | Sunshine templates (`@HOME@`, `@SIDE@` placeholders) |
+| `macos/sunshine/sunshine.conf.in`, `apps.json` | Sunshine templates rendered once per screen (`@HOME@`, `@NAME@`, `@TITLE@`, `@PORT@`, `@FPS@`, `@KEYBOARD@`) |
 | `macos/launchagents/*.plist` | LaunchAgent templates |
 | `linux/install.sh` | Symlinks bin + units into `~/.local/bin` and `~/.config/systemd/user`, builds the cursor shim, starts the bridge |
-| `linux/bin/mac-three-screens` | `start [stable\|high]`, `restart`, `stop`, `status` for the 3 units |
+| `linux/bin/mac-three-screens` | `start`, `restart`, `stop`, `status` for the configured screens' units |
 | `linux/bin/moonlight-mac-display` | One Moonlight window: finds the Mac, wakes it, launches, places and fullscreens the window, heartbeats, jitter |
 | `linux/bin/mac-mouse-bridge` | Python: reads X11 raw input / XQueryPointer via XWayland, maps to Mac coordinates, sends UDP |
 | `linux/bin/mac-screens-wake` | Python UDP client: `wake`, `heartbeat`, `release`, `jitter` |
 | `linux/bin/moonlight-show-cursor.c` | `LD_PRELOAD` shim forcing `SDL_ShowCursor` on so the Linux cursor shows on every stream |
-| `linux/systemd/*.service`, `linux/kde/moonlight.kwinrule` | User units; KDE rule that frees Super/Meta for the Mac |
-| `linux/environment.example` | Template for `~/.config/mac-three-screens/environment` |
-| `tests/check.py`, `tests/check-bridge.py` | Offline regression check; live UDP flow check |
+| `linux/systemd/*.service`, `linux/kde/moonlight.kwinrule` | User units (`mac-three-screens@.service` is a template, instance = screen name); KDE rule that frees Super/Meta for the Mac |
+| `common/mac-three-screens-config` | Reads the config. Python module and CLI (`names`, `primary`, `get`, `screen NAME`, `check linux\|mac`); symlinked into `linux/bin` and `macos/bin` so the scripts next to it can import it |
+| `config.example`, `examples/three-screens.config` | Settings templates: single display, and a three-monitor desk (also the fixture for `tests/check.py`) |
+| `tests/check.py`, `tests/check-bridge.py` | Offline regression check (also fails if private names such as a hostname leak into tracked files); live UDP flow check |
 
-Both platforms run from a checkout at `~/Documents/mac-three-screens`. On Linux everything in `linux/bin` is symlinked, so edits are live. On the Mac, the two session scripts are *copied* to `~/.local/bin` by `macos/install.sh`, and the Swift bridge is compiled there.
+Both platforms run from a checkout at `~/Documents/mac-three-screens`. On Linux everything in `linux/bin` is symlinked, so edits are live. On the Mac, the session scripts and the config tool are *copied* to `~/.local/bin` by `macos/install.sh`, and the Swift bridge is compiled there.
 
 ## Commands
 
@@ -60,37 +61,39 @@ Linux (run on the laptop):
 mac-three-screens start|restart|stop|status        # restart after editing moonlight-mac-display
 systemctl --user restart mac-mouse-bridge          # after editing linux/bin/mac-mouse-bridge
 systemctl --user daemon-reload                     # after editing linux/systemd/*
-tail -n 50 ~/.local/state/mac-three-screens/center.log
+tail -n 50 ~/.local/state/mac-three-screens/<name>.log
 journalctl --user -u mac-mouse-bridge -n 50
 ```
 
 Mac:
 ```sh
 ./macos/install.sh [--no-start]     # rebuilds the bridge; WITHOUT --no-start it restarts bridge + Sunshine
-launchctl list | grep anthony       # both com.anthony.* jobs should be listed
+launchctl list | grep mac-three-screens   # mouse-bridge and supervisor jobs should be listed
 ~/.local/bin/mac-sunshine-session has-active
 tail ~/.config/mac-mouse-bridge.log ~/.config/sunshine-three-autostart.log
 ```
 
 ## Configuration
 
-Linux, in `~/.config/mac-three-screens/environment` (systemd `EnvironmentFile`, uncommitted; template `linux/environment.example`):
-- `MAC_MOUSE_BRIDGE_ADDRESS`: Mac hostname or wired IP (default `FR-K3KFKV6TFX.local`).
-- `MAC_JITTER_SECONDS`: pointer jitter period while streaming (default 60, `0` disables).
+One file on each machine, `~/.config/mac-three-screens/config` (KEY=value lines; template `config.example`, three-monitor example `examples/three-screens.config`). The same file works on both; each side reads what it needs. Read it only through `common/mac-three-screens-config` (module or CLI), never re-parse it in a script.
 
-Stream resolution, FPS, bitrate and window origins live in `linux/bin/moonlight-mac-display`. Mac display geometry for pointer mapping lives in `MAC_DISPLAYS` in `linux/bin/mac-mouse-bridge`. They must stay consistent with BetterDisplay and the `.conf.in` files (README has the table).
+- Global: `MAC_HOST` (required on Linux), `MAC_JITTER_SECONDS` (default 60, `0` off), `SCREENS` (default `main`; order sets Sunshine ports 47989 + 200·index), `PRIMARY_SCREEN`, `INTERNAL_SCREEN_TAG`, `UNMIRROR_FROM`.
+- Per screen `SCREEN_<NAME>_*`: `TAG` (required on the Mac), `WIDTH`, `HEIGHT`, `FPS`, `BITRATE` (Mbps), `WINDOW_X/Y`, `MAC_X/Y`, `MAC_WIDTH/HEIGHT`. Defaults live in `screens()` in the config tool; the README has the full table.
+- Window title and Sunshine name are `Mac-<name>`; Moonlight profile `~/.config/moonlight-<name>`; Sunshine dir `~/.config/sunshine-<name>`.
+- Add a setting by adding its default in `screens()` (or a `get` call) and documenting it in `config.example` and the README table, never by hard-coding a value in a script. Config changes take effect after `macos/install.sh` (Mac) and `mac-three-screens restart` (Linux).
 
 ## Rules and gotchas
 
-- Never commit credentials, certificates, pairing state, `Moonlight.conf`, or `.local-backups/`. Never put passwords, keys or IPs of private machines in tracked files.
+- Never commit credentials, certificates, pairing state, `Moonlight.conf`, or `.local-backups/`. Never put passwords, keys, hostnames or IPs of private machines in tracked files.
 - Edit the `.conf.in` templates, not `~/.config/sunshine-*/sunshine.conf`; the installer overwrites the live ones.
-- Rebuilding `~/.local/bin/mac-mouse-bridge` makes macOS revoke its Accessibility permission. Symptom: the pointer moves but clicks do nothing, and `~/.config/mac-mouse-bridge.log` says it needs Accessibility. Fix: re-add the binary in System Settings → Privacy & Security → Accessibility, then `launchctl kickstart -k gui/$(id -u)/com.anthony.mac-mouse-bridge`.
+- Rebuilding `~/.local/bin/mac-mouse-bridge` makes macOS revoke its Accessibility permission. Symptom: the pointer moves but clicks do nothing, and `~/.config/mac-mouse-bridge.log` says it needs Accessibility. Fix: re-add the binary in System Settings → Privacy & Security → Accessibility, then `launchctl kickstart -k gui/$(id -u)/com.mac-three-screens.mouse-bridge`.
 - Side-stream keyboard/mouse capture must stay off, or they overwrite the global Mac pointer.
 - Do not send a pointer sample on button release; Moonlight shifts the pointer and Chromium turns it into a drag. `tests/check.py` guards this.
 - Each wake/heartbeat/release must use a fresh UDP socket, and the Mac must close the flow after replying; otherwise the UDP flow table fills and renewals stop.
+- `check linux` / `check mac` must pass before anything starts; the launchers exit 2 with a message otherwise.
 - Cursor visibility depends on the `LD_PRELOAD` shim (`~/.local/lib/moonlight-show-cursor.so`), not on Moonlight's Ctrl+Alt+Shift+C toggle, which is stateful and unreliable.
 - Display geometry, KDE behaviour and encoder load are specific to these machines; verify input changes with a real mouse after `tests/check.py` passes.
-- The README still mentions an AppleScript launcher for the bridge; it was removed and launchd now runs the binary directly with `KeepAlive`.
+- launchd runs `~/.local/bin/mac-mouse-bridge` directly with `KeepAlive` (labels `com.mac-three-screens.mouse-bridge` and `.supervisor`); there is no AppleScript launcher any more.
 
 ## Permissions
 

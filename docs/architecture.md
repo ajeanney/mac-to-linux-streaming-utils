@@ -17,27 +17,27 @@ Plain ASCII datagrams, space-separated. Handler: `handle()` in `macos/bin/mac-mo
 | `J` | | Pointer jitter: +1 px then back after 50 ms; skipped while a button is held | none |
 | `P` | | Prepare: bring virtual screens up (up to 180 s, off the input queue) | `READY` / `ERROR` |
 | `K` | | Heartbeat: refresh the stream lease | `READY` |
-| `L` | `role` | Release a lease (`left`, `center`, `right`, `all`) | `READY` |
+| `L` | `role` | Release a lease (a screen name, or `all`) | `READY` |
 
 Input messages are fire-and-forget. Session messages (`P`, `K`, `L`) are retried by the client until a reply or timeout, from a fresh socket each time.
 
 ## Lease lifecycle
 
 1. `moonlight-mac-display` calls `mac-screens-wake wake` (`P`). The Mac writes a short wake lease and the supervisor connects the displays.
-2. Sunshine's `apps.json` `prep-cmd` runs `mac-sunshine-session acquire <side>` when a client connects (records the lease only).
+2. Sunshine's `apps.json` `prep-cmd` runs `mac-sunshine-session acquire <name>` when a client connects (records the lease only).
 3. While Moonlight runs, a loop sends `K` every 45 s. Leases last 150 s (`LEASE_SECONDS`).
-4. On exit, the launcher sends `L <side>`. If the Linux side vanishes, the lease expires and the supervisor powers the screens down.
+4. On exit, the launcher sends `L <name>`. If the Linux side vanishes, the lease expires and the supervisor powers the screens down.
 5. State lives in a small JSON file written atomically by `mac-sunshine-session`; the supervisor uses `lockf` on `~/.config/sunshine-three-supervisor.lock`.
 
 While a session is active the built-in panel is blanked (brightness 0, saved to `~/.config/sunshine-three-internal-brightness`) and the keyboard backlight and auto-brightness are saved, switched off, and restored afterwards (`mac-keyboard-backlight`).
 
 ## Linux pointer bridge
 
-`linux/bin/mac-mouse-bridge` runs as a user service. It reads X11 raw input and `XQueryPointer` through XWayland (Qt `xcb`, SDL `x11`), finds which Moonlight window is under the pointer (`refresh_windows`), maps the position into that screen's Mac rectangle (`map_pointer`, `MAC_DISPLAYS`) and sends `M`/`B`/`W`. The portrait screen is scaled. It pauses forwarding while the center window is minimized, releases held buttons/modifiers, and follows the host recorded in `~/.local/state/mac-three-screens/host`.
+`linux/bin/mac-mouse-bridge` runs as a user service. It reads X11 raw input and `XQueryPointer` through XWayland (Qt `xcb`, SDL `x11`), finds which Moonlight window is under the pointer (`refresh_windows`), maps the position into that screen's Mac rectangle (`map_pointer`, `MAC_DISPLAYS`, built from the config's `MAC_*` keys) and sends `M`/`B`/`W`. It pauses forwarding while the primary window is minimized, releases held buttons/modifiers, and follows the host recorded in `~/.local/state/mac-three-screens/host`.
 
 ## Moonlight window handling
 
-`moonlight-mac-display <side>` ranks Mac addresses by ping (mDNS, last working IP, subnet sweep as last resort), wakes the Mac, starts `moonlight stream` with the profile's resolution/FPS/bitrate, then with `xdotool` moves the window to its origin, fullscreens it, disables the pointer-region lock (Ctrl+Alt+Shift+L), turns capture off on side windows (Ctrl+Alt+Shift+Z), and rechecks fullscreen for about 10 s while the decoder initialises. `mac-three-screens start` finally activates the center window. Center also runs the jitter loop.
+`moonlight-mac-display <name>` ranks Mac addresses by ping (mDNS, last working IP, subnet sweep as last resort), wakes the Mac, starts `moonlight stream` with the profile's resolution/FPS/bitrate, then with `xdotool` moves the window to its origin, fullscreens it, disables the pointer-region lock (Ctrl+Alt+Shift+L), turns capture off on non-primary windows (Ctrl+Alt+Shift+Z), and rechecks fullscreen for about 10 s while the decoder initialises. `mac-three-screens start` finally activates the primary window. The primary screen also runs the jitter loop.
 
 ## Input-permission model
 
