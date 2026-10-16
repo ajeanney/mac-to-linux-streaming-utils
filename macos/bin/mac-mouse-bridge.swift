@@ -344,6 +344,14 @@ func handle(_ data: Data, reply: @escaping (String?) -> Void) {
         if let down = Int(fields[1]) {
             setMouseModifier("control", down: down != 0)
         }
+    case "J":
+        // Idle-defeating jitter: nudge one pixel and back, never mid-click.
+        guard pressedButtons.isEmpty else { break }
+        let home = lastPoint
+        postMove(home.x + 1, home.y)
+        queue.asyncAfter(deadline: .now() + 0.05) {
+            if pressedButtons.isEmpty { postMove(home.x, home.y) }
+        }
     case "R":
         releaseShift()
     case "Q":

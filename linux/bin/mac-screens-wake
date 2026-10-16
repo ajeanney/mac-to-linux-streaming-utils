@@ -64,8 +64,14 @@ if __name__ == '__main__':
         raise SystemExit(ask(host, b'P', 180))
     if mode == 'heartbeat' and host:
         raise SystemExit(ask(host, b'K', 10))
+    if mode == 'jitter' and host:
+        # Fire and forget: the Mac nudges its pointer 1px and back, no reply.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            for ip in addresses(host):
+                sock.sendto(b'J', (ip, PORT))
+        raise SystemExit(0)
     if mode == 'release' and host and role:
         # Best effort: a reply is nice but the Mac also expires the lease.
         raise SystemExit(ask(host, ('L ' + role).encode(), 10))
-    print('usage: mac-screens-wake wake|heartbeat HOST | release HOST ROLE', file=sys.stderr)
+    print('usage: mac-screens-wake wake|heartbeat|jitter HOST | release HOST ROLE', file=sys.stderr)
     raise SystemExit(2)

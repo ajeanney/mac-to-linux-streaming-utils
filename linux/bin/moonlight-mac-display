@@ -227,6 +227,21 @@ child_pid=$!
 ) &
 heartbeat_pid=$!
 
+# Move the Mac pointer 1px and back every MAC_JITTER_SECONDS (default 60, 0 =
+# off) while the stream runs; set it in ~/.config/mac-three-screens/environment.
+# Center only, so three streams do not triple it.
+jitter_seconds=${MAC_JITTER_SECONDS:-60}
+if [ "$side" = center ] && [ "$jitter_seconds" -gt 0 ] 2>/dev/null; then
+  (
+    while kill -0 "$child_pid" 2>/dev/null; do
+      sleep "$jitter_seconds"
+      kill -0 "$child_pid" 2>/dev/null || break
+      "$HOME/.local/bin/mac-screens-wake" jitter "$mac_host" >/dev/null 2>&1 || true
+    done
+  ) &
+  jitter_pid=$!
+fi
+
 window_id=''
 for _ in $(seq 1 100); do
   for candidate in $(xdotool search --class moonlight 2>/dev/null); do
@@ -298,6 +313,9 @@ if [ -n "$heartbeat_pid" ]; then
   kill "$heartbeat_pid" 2>/dev/null || true
   wait "$heartbeat_pid" 2>/dev/null || true
   heartbeat_pid=''
+fi
+if [ -n "${jitter_pid:-}" ]; then
+  kill "$jitter_pid" 2>/dev/null || true
 fi
 # Moonlight exited: drop the lease too, whichever way the stream ended.
 release_lease
