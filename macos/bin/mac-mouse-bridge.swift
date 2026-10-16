@@ -318,24 +318,6 @@ func runSessionHelper(_ arguments: [String], failure: String) -> String {
     }
 }
 
-// The Fn keys do this through the same media-key events, and only a process
-// trusted for Accessibility (this bridge) can post them.
-// NX_KEYTYPE_ILLUMINATION_* from IOKit's ev_keymap.h: up is 21, down is 22.
-let illuminationKeys: [String: Int64] = ["up": 21, "down": 22, "toggle": 23]
-
-func postIlluminationKey(_ key: Int64, count: Int) {
-    let dataField = CGEventField(rawValue: 133)!  // NX_KEYDATA
-    for _ in 0..<max(0, count) {
-        guard let event = CGEvent(source: nil) else { return }
-        event.type = CGEventType(rawValue: 14)!  // NX_SYSDEFINED
-        for state in [Int64(0x0a00), 0x0b00] {   // key down, key up
-            event.setIntegerValueField(dataField, value: (key << 16) | state)
-            event.post(tap: .cghidEventTap)
-        }
-        usleep(15000)
-    }
-}
-
 func handle(_ data: Data, reply: @escaping (String?) -> Void) {
     guard let message = String(data: data, encoding: .utf8) else { reply(nil); return }
     let fields = message.split(separator: " ")
@@ -409,14 +391,6 @@ func handle(_ data: Data, reply: @escaping (String?) -> Void) {
             reply(answer)
         }
         return
-    case "X" where fields.count == 3:
-        // Keyboard backlight steps, used instead of the BetterDisplay panel
-        // brightness because macOS has no readable level for the keyboard.
-        if let key = illuminationKeys[String(fields[1])], let count = Int(fields[2]) {
-            postIlluminationKey(key, count: count)
-            reply("READY")
-            return
-        }
     default:
         break
     }

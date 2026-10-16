@@ -35,6 +35,7 @@ install_script() {
 install_script "$root/macos/bin/mac-sunshine-three" "$HOME/.local/bin/mac-sunshine-three"
 install_script "$root/macos/bin/mac-sunshine-session" "$HOME/.local/bin/mac-sunshine-session"
 link_file "$root/macos/bin/mac-mouse-bridge.swift" "$HOME/.local/bin/mac-mouse-bridge.swift"
+clang -framework Foundation "$root/macos/bin/mac-keyboard-backlight.m" -o "$HOME/.local/bin/mac-keyboard-backlight"
 
 # Keep the executable at its existing path for macOS input permissions.
 if [[ "$mode" != --no-start || ! -x "$HOME/.local/bin/mac-mouse-bridge" ]]; then
@@ -78,8 +79,7 @@ for side in ('left', 'center', 'right'):
     apps_target.write_text(app_template)
 for source in (root / 'macos/launchagents').glob('*.plist'):
     write_config(source, home / 'Library/LaunchAgents' / source.name)
-# Only the level to put back when a stream ends is configurable: macOS cannot
-# report the current keyboard backlight level, so the user owns this value.
+# Fallback restore level when the keyboard was already dark at session start.
 backlight = home / '.config' / 'sunshine-three-keyboard-backlight'
 if not backlight.exists():
     backlight.write_text('1.0\n')
