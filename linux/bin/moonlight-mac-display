@@ -20,6 +20,13 @@ rtt() {
 # ping so the streams stay on the gigabit link.
 ranked_candidates() {
   {
+    # mDNS can be late after a Mac reboot. Try the last working IPv4 host too.
+    if [ -f "$HOME/.local/state/mac-three-screens/host" ]; then
+      awk '/^[0-9]+(\.[0-9]+){3}$/' "$HOME/.local/state/mac-three-screens/host"
+    fi
+    if [[ "$mac_name" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      printf '%s\n' "$mac_name"
+    fi
     if command -v avahi-resolve-host-name >/dev/null 2>&1; then
       avahi-resolve-host-name -4 "$mac_name" 2>/dev/null | awk '{print $2}'
     fi
@@ -51,7 +58,7 @@ sweep_candidates() {
 # Sunshine is stopped while the virtual screens are idle. Wake them through
 # the always-on Mac mouse bridge before looking for the Sunshine host ports.
 for candidate in $(ranked_candidates); do
-  if port_open "$candidate" || "$HOME/.local/bin/mac-screens-wake" wake "$candidate"; then
+  if "$HOME/.local/bin/mac-screens-wake" wake "$candidate"; then
     mac_host=$candidate
     break
   fi
@@ -59,7 +66,7 @@ done
 
 if [ -z "$mac_host" ]; then
   for candidate in $(sweep_candidates | awk '!seen[$0]++'); do
-    if port_open "$candidate"; then
+    if port_open "$candidate" && "$HOME/.local/bin/mac-screens-wake" wake "$candidate"; then
       mac_host=$candidate
       break
     fi
@@ -67,8 +74,16 @@ if [ -z "$mac_host" ]; then
 fi
 
 if [ -z "$mac_host" ]; then
-  mac_host=$mac_name
+  echo "Could not wake the Mac or prepare its virtual displays; check BetterDisplay and the Mac supervisor." >&2
+  exit 1
 fi
+
+# The bridge follows the actual stream address, including after a reboot or
+# network change. Write atomically because all three launchers share it.
+state_dir="$HOME/.local/state/mac-three-screens"
+mkdir -p "$state_dir"
+printf '%s\n' "$mac_host" > "$state_dir/host.$$"
+mv "$state_dir/host.$$" "$state_dir/host"
 
 case "$side:$profile" in
   left:stable)
@@ -164,7 +179,7 @@ release_lease() {
     released=1
     # Tell the Mac this stream is done so it can power its virtual screens
     # down now instead of waiting out the lease.
-    "$HOME/.local/bin/mac-screens-wake" release "$mac_name" "$side" >/dev/null 2>&1 || true
+    "$HOME/.local/bin/mac-screens-wake" release "$mac_host" "$side" >/dev/null 2>&1 || true
   fi
 }
 
@@ -200,7 +215,7 @@ child_pid=$!
 # the Mac powers the screens back down on its own.
 (
   while kill -0 "$child_pid" 2>/dev/null; do
-    "$HOME/.local/bin/mac-screens-wake" heartbeat "$mac_name" >/dev/null 2>&1 || true
+    "$HOME/.local/bin/mac-screens-wake" heartbeat "$mac_host" >/dev/null || true
     sleep 45
   done
 ) &

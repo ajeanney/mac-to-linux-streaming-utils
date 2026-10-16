@@ -5,6 +5,16 @@ set -u
 units=(mac-three-screens-left.service mac-three-screens-center.service mac-three-screens-right.service)
 command=${1:-status}
 
+stop_streams() {
+  systemctl --user stop "${units[@]}" || return
+  local host_file="$HOME/.local/state/mac-three-screens/host" host
+  if [ -f "$host_file" ]; then
+    read -r host < "$host_file"
+    "$HOME/.local/bin/mac-screens-wake" release "$host" all || return
+  fi
+  return 0
+}
+
 case "$command" in
   start|restart)
     profile=${2:-stable}
@@ -12,7 +22,7 @@ case "$command" in
       stable|high) ;;
       *) echo "profile must be stable or high" >&2; exit 2 ;;
     esac
-    systemctl --user stop "${units[@]}" >/dev/null 2>&1 || true
+    stop_streams || echo "Could not confirm previous session cleanup; trying a new session." >&2
     systemctl --user set-environment "MAC_SCREENS_PROFILE=$profile"
     systemctl --user start "${units[@]}"
     export DISPLAY="${DISPLAY:-:0}"
@@ -38,7 +48,7 @@ case "$command" in
     done
     ;;
   stop)
-    systemctl --user stop "${units[@]}"
+    stop_streams || exit 1
     systemctl --user unset-environment MAC_SCREENS_PROFILE >/dev/null 2>&1 || true
     ;;
   status)
