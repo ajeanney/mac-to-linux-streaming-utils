@@ -151,7 +151,7 @@ fi
   --resolution "$resolution" \
   --fps "$fps" \
   --bitrate "$bitrate" \
-  --video-codec HEVC \
+  --video-codec H.264 \
   --video-decoder hardware \
   --display-mode windowed \
   --no-vsync \
