@@ -11,8 +11,9 @@ macos/
   install.sh                          Build/install the Mac side
   bin/
     mac-sunshine-three                BetterDisplay/Sunshine supervisor
+    mac-sunshine-session              Display leases and brightness restore
+    mac-keyboard-backlight.m          Native keyboard brightness helper
     mac-mouse-bridge.swift            Native mouse event receiver
-    mac-mouse-bridge-launch.applescript  Launch receiver through Terminal
   launchagents/                      Login startup templates
   sunshine/
     apps.json                        Desktop application definition
@@ -52,7 +53,7 @@ The tag IDs belong to this BetterDisplay installation. macOS capture IDs change 
 
 The captured working versions are macOS 27.0, BetterDisplay 5.0.6, Sunshine 2026.922.203725, and Moonlight Qt 6.1.0 on Arch Linux with KDE Plasma/KWin 6.7.5 and Wayland/XWayland. Other versions are not verified by this snapshot.
 
-On the Mac, install [BetterDisplay](https://github.com/waydabber/BetterDisplay) and [Sunshine](https://github.com/LizardByte/Sunshine/releases) in `/Applications`. Install Apple's command line tools for `swiftc`, and make Python 3 available:
+On the Mac, install [BetterDisplay](https://github.com/waydabber/BetterDisplay) and [Sunshine](https://github.com/LizardByte/Sunshine/releases) in `/Applications`. Install Apple's command line tools for `swiftc` and `clang`, and make Python 3 available:
 
 ```sh
 xcode-select --install
@@ -84,7 +85,7 @@ The live bridge uses X11 raw input and XQueryPointer through XWayland. The launc
    ```
 
    This builds the Swift receiver, compiles its AppleScript launcher, renders the Sunshine/LaunchAgent templates for your home directory, and starts the two login jobs. It restarts this setup's Sunshine instances and mouse receiver; reconnect the Linux streams afterward if they were running.
-4. In macOS **Privacy & Security**, allow Sunshine screen recording and input permissions, and allow Terminal accessibility/input control. Allow the launcher to automate Terminal when macOS asks. The receiver runs through Terminal because that is the input-permission path used by this working setup. Keep the binary at `~/.local/bin/mac-mouse-bridge`.
+4. In macOS **Privacy & Security**, allow Sunshine screen recording and input permissions, and allow `~/.local/bin/mac-mouse-bridge` accessibility/input control. The receiver runs directly under launchd with `KeepAlive`, so closing Terminal cannot stop it and a crashed receiver restarts automatically. Keep the binary at `~/.local/bin/mac-mouse-bridge`.
 5. Open each Sunshine web interface and create its local account if this is a fresh installation:
 
    | Instance | Stream address | Mac web interface |
@@ -99,15 +100,21 @@ The live bridge uses X11 raw input and XQueryPointer through XWayland. The launc
 
 The supervisor refreshes Sunshine's capture IDs whenever the virtual screens connect. The Linux launcher wakes the Mac through the always-on mouse bridge before starting Moonlight, so all three displays can stay disconnected during normal Mac use.
 
-Each stream holds a lease on the Mac while it runs. Sunshine runs a lease's `acquire` when a client connects, and each running Moonlight stream refreshes it every 45 seconds over the mouse bridge. When a stream ends on purpose it also sends a release, so `mac-three-screens stop` powers the screens down within seconds; the first stream to connect clears the wake hold, and a late wake request from a client that retried too long is ignored once a stream owns the screens. If the Mac hears nothing at all (crash, network cut, yanked cable) the lease simply expires after 150 seconds and the supervisor powers the screens down on its own.
+Each stream holds a lease on the Mac while it runs. Sunshine runs a lease's `acquire` when a client connects (this hook only records the lease; display setup is done by the Linux wake request), and each running Moonlight stream refreshes it every 45 seconds over the mouse bridge. When a stream ends on purpose it also sends a release, so `mac-three-screens stop` powers the screens down within seconds; the first stream to connect clears the wake hold, and a late wake request from a client that retried too long is ignored once a stream owns the screens. If the Mac hears nothing at all (crash, network cut, yanked cable) the lease simply expires after 150 seconds and the supervisor powers the screens down on its own.
+
+Leases are renewed by the running Moonlight processes, independently of keyboard or mouse activity. The Mac bridge closes each wake/heartbeat/release UDP flow after replying; otherwise the accumulating client ports can exhaust the UDP flow table, stop renewals, and block subsequent starts. Failed renewals appear in the Linux stream logs.
 
 A wake request writes a short lease of its own. That is what keeps the supervisor from powering the screens back down while Sunshine is still restarting around the new capture IDs.
+
+The supervisor uses macOS `lockf` with `~/.config/sunshine-three-supervisor.lock`; the kernel releases the lock on process exit or reboot, even if the file remains. Failed startup clears its wake lease and restores the Mac; Linux reports a preparation error instead of launching Moonlight against an unresolved host. The last working IP is also tried when mDNS is late.
 
 The `com.anthony.sunshine-three` LaunchAgent has `KeepAlive`, because a supervisor that dies silently is the difference between "works" and "every stream returns 503". If you ever see 503s, check that the agent is running first: `launchctl list | grep anthony` and `mac-sunshine-session has-active`.
 
 The built-in panel cannot be disconnected on this Mac: BetterDisplay 5.0.6 returns `Failed` for `set -tagID=2 -connected=off` and `-disconnectAllButMain` leaves it connected. Streaming instead blanks it by dropping its brightness to zero and puts the previous brightness back when the session ends. The value is saved in `~/.config/sunshine-three-internal-brightness` for the duration of the session.
 
-The built-in keyboard backlight is switched off for the same reason. `hidutil property --set '{"KeyboardBacklightBrightness":...}'` is accepted by macOS and then ignored, so the bridge posts the same illumination media-key events `Fn+F5`/`Fn+F6` produce: sixteen down steps to go dark, and the level in `~/.config/sunshine-three-keyboard-backlight` mapped onto sixteen up steps to come back (`0` is off, `1` is full, and the installer writes `1.0` if the file is missing). Edit that file to match the level you normally keep. Only the mouse bridge can post those events, which is why this goes through it.
+The built-in keyboard backlight is switched off through the small native `mac-keyboard-backlight` helper, compiled by the Mac installer. It uses CoreBrightness directly; simulated brightness keys and `hidutil` do not work on this Mac. The session saves the current keyboard brightness and automatic brightness setting, disables automatic brightness while streaming, then restores both on stop. If the keyboard was already dark, `~/.config/sunshine-three-keyboard-backlight` provides the restore level (`0`–`1`, default `1.0`). CoreBrightness is a private macOS interface: the helper reports an error if a future macOS version changes it.
+
+The Linux bridge follows the address selected by the streaming launcher, recorded in `~/.local/state/mac-three-screens/host`, instead of retaining the address guessed at login. Heartbeats and releases also use that same address.
 
 ## Linux setup and pairing
 
@@ -169,6 +176,10 @@ mac-three-screens stop
 
 The center Moonlight window owns keyboard focus. The mouse bridge sends global Mac pointer events across all three displays. Side streams are viewers: Sunshine rejects both their mouse and keyboard input. The bridge releases side-window capture after clicks and returns keyboard focus to the center.
 
+Minimize the center stream with **Ctrl+Shift+Alt+D** to use the Linux desktop. While it is minimized, the bridge pauses mouse and special-key forwarding on all screens and releases held buttons/modifiers. Side-window clicks cannot restore the center stream. Restore the center window to resume control; minimized side windows never receive mouse input.
+
+`mac-three-screens stop` explicitly releases all three display sessions after closing Moonlight, including while minimized. It reports an error if the Mac does not acknowledge a release. Startup rechecks fullscreen during the first ten seconds while Moonlight initializes its video surface.
+
 For normal Mac use, stop the streams on Linux. Within about two and a half minutes the leases expire and the Mac disconnects all three virtual displays. Starting `mac-three-screens` wakes them again before Moonlight connects.
 
 To disable remote mouse input entirely:
@@ -209,6 +220,14 @@ It checks pointer mapping, ordinary click versus genuine drag handling, script/t
 swiftc -typecheck macos/bin/mac-mouse-bridge.swift
 ```
 
+To check the control bridge from Linux with a running or idle Mac (no mouse or keyboard events are sent):
+
+```sh
+python3 tests/check-bridge.py MAC_IP
+```
+
+This opens 1,100 fresh UDP client sockets to catch the old flow accumulation failure.
+
 Linux diagnostics:
 
 ```sh
@@ -219,7 +238,7 @@ tail -n 50 ~/.local/state/mac-three-screens/center.log
 
 Mac logs are `~/.config/mac-mouse-bridge.log`, `~/.config/sunshine-three-autostart.log`, and `~/.config/sunshine-{left,center,right}/sunshine.log`.
 
-- **Video connects but mouse clicks fail:** check the Linux bridge service and Terminal's macOS input permission. Check UDP port 45991 and both display coordinate maps.
+- **Video connects but mouse clicks fail:** check the Linux bridge service and the mouse bridge's macOS input permission. Check UDP port 45991 and both display coordinate maps.
 - **Chromium reload opens its menu:** ordinary clicks must not send a new pointer sample on button release. That creates a synthetic drag when Moonlight shifts the pointer. The regression check protects this fix. Keep side Sunshine keyboard input disabled so local capture shortcuts cannot inject modifiers.
 - **Command-click drags a Linux window or Command-V opens KDE clipboard:** check the imported window rule, KDE's modifier mouse binding, and center Moonlight focus.
 - **A display reconnects incorrectly:** check BetterDisplay tags and arrangement, then Sunshine logs. Restart the Linux streams once the hosts are listening again.
@@ -229,7 +248,7 @@ Mac logs are `~/.config/mac-mouse-bridge.log`, `~/.config/sunshine-three-autosta
 
 Runtime state remains in the normal OS locations:
 
-- Mac: `~/.config/sunshine-{left,center,right}/` contains credentials, certificates, pairing state, rendered configs, and logs. `~/.local/bin/mac-mouse-bridge` and `mac-mouse-bridge-launch.scpt` are generated artifacts; `~/Library/LaunchAgents` contains rendered startup files.
+- Mac: `~/.config/sunshine-{left,center,right}/` contains credentials, certificates, pairing state, rendered configs, and logs. `~/.local/bin/mac-mouse-bridge` is a generated executable; `~/Library/LaunchAgents` contains rendered startup files.
 - Linux: `~/.config/moonlight-{left,center,right}/` contains each client identity and paired hosts. `~/.local/state/mac-three-screens/` contains stream logs. KDE settings and `~/.config/mac-three-screens/environment` are local settings.
 - `.local-backups/` contains the pre-migration scripts and installer backups on each computer. It is ignored by Git.
 
