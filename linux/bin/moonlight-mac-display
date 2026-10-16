@@ -260,6 +260,31 @@ for _ in $(seq 1 100); do
         xdotool windowminimize "$candidate" 2>/dev/null || true
       fi
     done
+    # Moonlight can reset the window state when its decoder creates the video
+    # surface. Recheck through startup without activating minimized windows.
+    for _ in $(seq 1 50); do
+      kill -0 "$child_pid" 2>/dev/null || break
+      current_window=''
+      for candidate in $(xdotool search --onlyvisible --class moonlight 2>/dev/null); do
+        window_name=$(xdotool getwindowname "$candidate" 2>/dev/null || true)
+        case "$window_name" in
+          "$title"*) current_window=$candidate; break ;;
+        esac
+      done
+      if [ -n "$current_window" ]; then
+        if [ "$current_window" != "$window_id" ]; then
+          window_id=$current_window
+          xdotool windowmove "$window_id" "$target_x" "$target_y" 2>/dev/null || true
+        fi
+        if window_state=$(xprop -id "$window_id" _NET_WM_STATE 2>/dev/null); then
+          case "$window_state" in
+            *_NET_WM_STATE_FULLSCREEN*) ;;
+            *) xdotool windowstate --add FULLSCREEN "$window_id" 2>/dev/null || true ;;
+          esac
+        fi
+      fi
+      sleep 0.2
+    done
     break
   fi
   sleep 0.2

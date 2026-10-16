@@ -129,49 +129,84 @@ CONTROL_MASK = 1 << 2
 last_sent_shift = None
 last_sent_command = None
 last_sent_control = None
+INPUT_LOCK = threading.RLock()
+INPUT_ACTIVE = False
+PRESSED_BUTTONS = set()
 
 
-def send(message):
+def send_unchecked(message):
     try:
         OUT.sendto(message.encode("ascii"), DESTINATION)
     except OSError:
         pass
 
 
+def input_enabled():
+    global INPUT_ACTIVE, last_sent_shift, last_sent_command, last_sent_control
+    with INPUT_LOCK:
+        center = window_id_for("Mac-Center-Ultrawide")
+        enabled = bool(center and POINTER and POINTER.is_visible(center))
+        if INPUT_ACTIVE and not enabled:
+            for button in PRESSED_BUTTONS:
+                send_unchecked(f"B {button} 0")
+            PRESSED_BUTTONS.clear()
+            for message in ("S 0", "D 0", "V 0", "R", "Q", "C", "I 0 0", "T 0 0"):
+                send_unchecked(message)
+            last_sent_shift = last_sent_command = last_sent_control = None
+        INPUT_ACTIVE = enabled
+        return enabled
+
+
+def send(message):
+    with INPUT_LOCK:
+        if not input_enabled():
+            return
+        if message.startswith("B "):
+            _, button, down = message.split()
+            if down == "1":
+                PRESSED_BUTTONS.add(button)
+            elif button in PRESSED_BUTTONS:
+                PRESSED_BUTTONS.remove(button)
+            else:
+                return
+        send_unchecked(message)
+        return True
+
+
 def set_shift_state(down):
     global last_sent_shift
     if last_sent_shift == down:
         return
-    send(f"S {1 if down else 0}")
-    last_sent_shift = down
+    if send(f"S {1 if down else 0}"):
+        last_sent_shift = down
 
 
 def force_shift_release():
     global last_sent_shift
-    send("R")
-    last_sent_shift = False
+    if send("R"):
+        last_sent_shift = False
 
 
 def set_command_state(down):
     global last_sent_command
     if last_sent_command == down:
         return
-    send(f"D {1 if down else 0}")
-    last_sent_command = down
+    if send(f"D {1 if down else 0}"):
+        last_sent_command = down
 
 
 def force_command_release():
     global last_sent_command
-    send("Q")
-    last_sent_command = False
+    if send("Q"):
+        last_sent_command = False
 
 
 def set_control_state(down):
     global last_sent_control
     if last_sent_control == down:
         return
-    send(f"V {1 if down else 0}")
-    last_sent_control = down
+    if send(f"V {1 if down else 0}"):
+        last_sent_control = down
 
 
 class X11Pointer:
@@ -180,6 +215,11 @@ class X11Pointer:
 
     def __init__(self):
         self.x11 = ctypes.CDLL("libX11.so.6")
+        self.x11.XInitThreads()
+        # Window IDs can disappear between the discovery and visibility query.
+        self.error_handler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda *_: 0)
+        self.x11.XSetErrorHandler.argtypes = [type(self.error_handler)]
+        self.x11.XSetErrorHandler(self.error_handler)
         self.x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
         self.x11.XOpenDisplay.restype = ctypes.POINTER(self.Display)
         self.x11.XDefaultRootWindow.argtypes = [ctypes.POINTER(self.Display)]
@@ -196,7 +236,34 @@ class X11Pointer:
         if not self.display:
             raise RuntimeError("cannot open XWayland display")
         self.root = self.x11.XDefaultRootWindow(self.display)
+        self.x11.XInternAtom.argtypes = [ctypes.POINTER(self.Display), ctypes.c_char_p, ctypes.c_int]
+        self.x11.XInternAtom.restype = ctypes.c_ulong
+        self.wm_state = self.x11.XInternAtom(self.display, b"WM_STATE", False)
+        self.x11.XGetWindowProperty.argtypes = [
+            ctypes.POINTER(self.Display), ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+        self.x11.XFree.argtypes = [ctypes.c_void_p]
         self.last_mask = 0
+
+    def is_visible(self, window):
+        actual_type, count, remaining = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_ulong()
+        format_bits = ctypes.c_int()
+        data = ctypes.POINTER(ctypes.c_ubyte)()
+        status = self.x11.XGetWindowProperty(
+            self.display, window, self.wm_state, 0, 2, False, 0,
+            ctypes.byref(actual_type), ctypes.byref(format_bits), ctypes.byref(count),
+            ctypes.byref(remaining), ctypes.byref(data),
+        )
+        try:
+            return bool(status == 0 and format_bits.value == 32 and count.value and
+                        ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0] == 1)
+        finally:
+            if data:
+                self.x11.XFree(data)
 
     def get(self):
         root = ctypes.c_ulong()
@@ -220,6 +287,13 @@ POINTER = None
 
 
 def refresh_windows():
+    global DESTINATION
+    try:
+        host = (Path.home() / '.local/state/mac-three-screens/host').read_text().strip()
+        socket.inet_aton(host)
+        DESTINATION = (host, MAC_PORT)
+    except (OSError, ValueError):
+        pass
     found = {}
     env = os.environ.copy()
     env["DISPLAY"] = DISPLAY
@@ -271,8 +345,10 @@ def map_pointer(position):
     px, py = position
     with WINDOWS_LOCK:
         current = list(WINDOWS.items())
-    for name, (window_x, window_y, window_w, window_h, _) in current:
+    for name, (window_x, window_y, window_w, window_h, window_id) in current:
         if not (window_x <= px < window_x + window_w and window_y <= py < window_y + window_h):
+            continue
+        if not POINTER.is_visible(window_id):
             continue
         mac_x, mac_y, mac_w, mac_h = MAC_DISPLAYS[name]
         x = mac_x + ((px - window_x) * mac_w / window_w)
@@ -287,9 +363,10 @@ def screen_at(position):
     px, py = position
     with WINDOWS_LOCK:
         current = list(WINDOWS.items())
-    for name, (window_x, window_y, window_w, window_h, _) in current:
+    for name, (window_x, window_y, window_w, window_h, window_id) in current:
         if window_x <= px < window_x + window_w and window_y <= py < window_y + window_h:
-            return name
+            if POINTER.is_visible(window_id):
+                return name
     return None
 
 
@@ -300,10 +377,12 @@ def window_id_for(name):
 
 
 def reset_side_input(name):
+    if not input_enabled():
+        return
     if name not in ("Mac-Left-Portrait", "Mac-Right-Landscape"):
         return
     window_id = window_id_for(name)
-    if not window_id:
+    if not window_id or not POINTER.is_visible(window_id):
         return
     env = os.environ.copy()
     env["DISPLAY"] = DISPLAY
@@ -317,7 +396,7 @@ def reset_side_input(name):
     except (OSError, subprocess.TimeoutExpired):
         pass
     center_id = window_id_for("Mac-Center-Ultrawide")
-    if center_id:
+    if center_id and input_enabled():
         try:
             subprocess.run(
                 ["xdotool", "windowactivate", str(center_id)],
@@ -373,6 +452,11 @@ def input_reader():
                     try:
                         button = int(line.split(":", 1)[1].strip())
                     except ValueError:
+                        continue
+                    if not input_enabled():
+                        left_press_target = None
+                        continue
+                    if event == "press" and screen_at(POINTER.get()) is None:
                         continue
                     if 1 <= button <= 3:
                         target = screen_at(POINTER.get())
@@ -483,7 +567,8 @@ def main():
     threading.Thread(target=input_reader, daemon=True).start()
     send_current()
     while True:
-        time.sleep(3600)
+        input_enabled()
+        time.sleep(0.05)
 
 
 if __name__ == "__main__":
