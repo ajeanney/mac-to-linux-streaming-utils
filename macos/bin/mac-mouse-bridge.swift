@@ -302,6 +302,12 @@ func runSessionHelper(_ arguments: [String], failure: String) -> String {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: NSHomeDirectory() + "/.local/bin/mac-sunshine-session")
     process.arguments = arguments
+    // Terminal/nohup can leave inherited descriptors unusable for Python.
+    process.standardInput = FileHandle.nullDevice
+    let log = FileHandle(forWritingAtPath: NSHomeDirectory() + "/.config/mac-mouse-bridge.log") ?? FileHandle.nullDevice
+    _ = try? log.seekToEnd()
+    process.standardOutput = log
+    process.standardError = log
     do {
         try process.run()
         process.waitUntilExit()
@@ -374,18 +380,23 @@ func handle(_ data: Data, reply: @escaping (String?) -> Void) {
         }
     case "C":
         clearModifiers()
-    case "P", "K":
+    case "P":
         // Bringing the virtual screens up can take a minute. Keep it off the
         // input queue so the mouse stays responsive, and drop repeats while
         // one is running so the client's retries cannot pile up behind the
         // session lock.
-        let sessionArguments = command == "P" ? ["prepare"] : ["heartbeat"]
+        guard !sessionBusy else { reply(nil); return }
+        sessionBusy = true
         sessionQueue.async {
-            guard !sessionBusy else { reply(nil); return }
-            sessionBusy = true
-            let answer = runSessionHelper(sessionArguments, failure: "Could not update the Sunshine display session")
-            sessionBusy = false
+            let answer = runSessionHelper(["prepare"], failure: "Could not prepare the Sunshine display session")
+            queue.async { sessionBusy = false }
             reply(answer)
+        }
+        return
+    case "K":
+        // A slow prepare must never prevent live streams renewing their leases.
+        releaseQueue.async {
+            reply(runSessionHelper(["heartbeat"], failure: "Could not renew the Sunshine display lease"))
         }
         return
     case "L" where fields.count == 2:
@@ -417,7 +428,12 @@ func receive(_ connection: NWConnection) {
         if let data, error == nil {
             handle(data) { reply in
                 guard let reply else { return }
-                connection.send(content: Data(reply.utf8), completion: .contentProcessed { _ in })
+                // Wake/heartbeat/release clients use a fresh UDP port each time.
+                // Retaining those flows exhausts Network.framework's UDP table,
+                // blocking new Linux requests while mouse activity masks it.
+                connection.send(content: Data(reply.utf8), completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
             }
         }
         if error == nil {
